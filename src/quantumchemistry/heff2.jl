@@ -169,9 +169,8 @@ function _use_parallel_terms(m::QCCenter)
 end
 
 function TK.mul!(y, m::QCCenter, x)
-    mul!(y, m.Hleft, x, true, false)
-    mul!(y, x, m.Hright, true, true)
-
+	mul!(y, m.Hleft, x, true, false)
+	mul!(y, x, m.Hright, true, true)
 	if !_use_parallel_terms(m)
 		return _mul_twoside_terms_serial!(y, m, x)
 	end

@@ -2,6 +2,8 @@ module QCDMRG
 
 
 export MolecularHamiltonian, randomqcmps, prodqcmps, u1u1_pspace
+export DMRGTiming, DMRGSweepTiming, reset_dmrg_timing!, finish_dmrg_timing!
+export print_dmrg_timing, print_dmrg_sweep_timing, active_dmrg_timing, total_sweep_time
 
 
 using Reexport

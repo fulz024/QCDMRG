@@ -18,5 +18,6 @@ include("util.jl")
 include("siteoperators.jl")
 include("renormalizedoperator.jl")
 include("renormalization.jl")
+include("timing.jl")
 include("quantumchemistry/quantumchemistry.jl")
 
