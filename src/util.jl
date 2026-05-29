@@ -1,6 +1,7 @@
+using LinearAlgebra: BLAS
+
 u1u1_pspace() = Rep[U₁×U₁]((0,0)=>1, (0,1)=>1, (1,0)=>1, (1,1)=>1)
 const _u1u1_pspace = u1u1_pspace()
-
 fermionparity(s::U1Irrep) = isodd(convert(Int, s.charge))
 fermionparity(s::SU2Irrep) = false
 fermionparity(P::ProductSector) = mapreduce(fermionparity, xor, P.sectors)
@@ -77,3 +78,45 @@ randomqcmps(L::Int; kwargs...) = randomqcmps(Float64, L; kwargs...)
 
 prodqcmps(::Type{T}, physectors::Vector; kwargs...) where {T<:Number} = prodmps(T, [_u1u1_pspace for i in 1:length(physectors)], physectors; kwargs...)
 prodqcmps(physectors::Vector; kwargs...) = prodqcmps(Float64, physectors; kwargs...)
+
+"""Pin BLAS/OpenMP threads. Julia threads are fixed at process start (`julia -t N`)."""
+function configure_threading!(; blas_threads::Int=1)
+	BLAS.set_num_threads(blas_threads)
+	return (
+		julia_threads=Threads.nthreads(),
+		blas_threads=blas_threads,
+	)
+end
+
+"""
+    recommended_threading(; cores, n_terms, strategy)
+
+Suggest how to split CPU cores between Julia structural parallelism and BLAS.
+
+- `strategy=:auto` — many `QCCenter` terms → Julia threads + BLAS=1; few terms → Julia=1 + BLAS threads.
+- `strategy=:julia` / `:blas` — force one layer.
+
+Restart Julia with `julia -t <julia_threads>`; call `configure_threading!(blas_threads=...)`.
+"""
+function recommended_threading(;
+	cores::Int=max(1, Threads.nthreads()),
+	n_terms::Int=0,
+	strategy::Symbol=:auto,
+)
+	if strategy == :julia
+		return (julia_threads=cores, blas_threads=1, strategy=:julia)
+	elseif strategy == :blas
+		return (julia_threads=1, blas_threads=cores, strategy=:blas)
+	end
+	# auto: need enough independent terms to amortize @spawn overhead
+	if n_terms > 0 && n_terms < 2 * cores
+		return (julia_threads=1, blas_threads=cores, strategy=:blas)
+	end
+	return (julia_threads=cores, blas_threads=1, strategy=:julia)
+end
+
+function apply_recommended_threading!(; kwargs...)
+	rec = recommended_threading(; kwargs...)
+	configure_threading!(blas_threads=rec.blas_threads)
+	return rec
+end
