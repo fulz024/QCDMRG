@@ -3,9 +3,9 @@ using Printf
 """
 Per half-sweep timings.
 
-- `Teff`: build renormalized storages + `QCCenter`
+- `Teff`: assemble `QCCenter` (`renormalizedstorage` + `terms`; block2 effective-H build only)
 - `Teig`: Davidson / Lanczos (includes all `H|ψ⟩` matvec)
-- `Tmve`: environment update (`updatestoragerenormalize*` + `setstorage!`, MPS write)
+- `Tmve`: environment shift (`renormalizestorage*`) + post-SVD `updatestoragerenormalize*` / `setstorage!`
 - `Tsvd`: two-site SVD truncation
 - `Tsplt`: split / merge MPS after SVD (normalize, bond tensors, energy check)
 """

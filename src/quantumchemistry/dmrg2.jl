@@ -32,24 +32,40 @@ function _timed!(f, t::DMRGTiming, field::Symbol)
 	return ret
 end
 
-function _build_heff!(env::QCDMRGCache, bond::Int)
+"""Shift QC environments to the current bond (block2 `move_to` / env update)."""
+function _renormalize_bond_storages!(env::QCDMRGCache, bond::Int)
 	mpsA, mpsB = env.mps[bond], env.mps[bond + 1]
 	Sleft = renormalizestorageleft(env, bond, space_l(mpsA))
 	Sright = renormalizestorageright(env, bond + 1, space_r(mpsB)')
+	return Sleft, Sright, mpsA, mpsB
+end
+
+"""Assemble `QCCenter` for Lanczos (block2 `Teff`: effective H only)."""
+function _assemble_heff!(Sleft, Sright, mpsA, mpsB)
 	Opleft = renormalizedstorage(Sleft)
 	Opright = renormalizedstorage(Sright)
 	heff = QCCenter(Opleft, Opright)
 	@tensor x[1, 2; 4, 5] := mpsA[1, 2, 3] * mpsB[3, 4, 5]
+	return heff, x, Opleft, Opright
+end
+
+function _prepare_bond_heff!(env::QCDMRGCache, bond::Int, t)
+	Sleft, Sright, mpsA, mpsB = if t === nothing
+		_renormalize_bond_storages!(env, bond)
+	else
+		_timed!(() -> _renormalize_bond_storages!(env, bond), t, :tmve)
+	end
+	heff, x, Opleft, Opright = if t === nothing
+		_assemble_heff!(Sleft, Sright, mpsA, mpsB)
+	else
+		_timed!(() -> _assemble_heff!(Sleft, Sright, mpsA, mpsB), t, :teff)
+	end
 	return heff, x, Opleft, Opright, mpsA, mpsB
 end
 
 function _optimize_bond_left!(env::QCDMRGCache, bond::Int, alg::QCDMRG2)
 	t = active_dmrg_timing()
-	heff, x, Opleft, _, _, _ = if t === nothing
-		_build_heff!(env, bond)
-	else
-		_timed!(() -> _build_heff!(env, bond), t, :teff)
-	end
+	heff, x, Opleft, _, _, _ = _prepare_bond_heff!(env, bond, t)
 
 	eigenvalues_0, eigenvecs_0 = if t === nothing
 		eigsolve(heff, renormalizedoperator(x), 1, :SR, Lanczos(; maxiter=100, tol=alg.toleig, eager=true))
@@ -120,11 +136,7 @@ end
 
 function _optimize_bond_right!(env::QCDMRGCache, bond::Int, alg::QCDMRG2)
 	t = active_dmrg_timing()
-	heff, x, _, Opright, _, mpsB = if t === nothing
-		_build_heff!(env, bond)
-	else
-		_timed!(() -> _build_heff!(env, bond), t, :teff)
-	end
+	heff, x, _, Opright, _, mpsB = _prepare_bond_heff!(env, bond, t)
 
 	eigenvalues_0, eigenvecs_0 = if t === nothing
 		eigsolve(heff, renormalizedoperator(x), 1, :SR, Lanczos(; maxiter=100, tol=alg.toleig, eager=true))
@@ -194,7 +206,8 @@ function _optimize_bond_right!(env::QCDMRGCache, bond::Int, alg::QCDMRG2)
 	return eigenvalue, delta
 end
 
-function _run_half_sweep_timing!(alg::QCDMRG2, direction::String, f)
+# `f do ... end` passes the closure as the first argument.
+function _run_half_sweep_timing!(f, alg::QCDMRG2, direction::String)
 	reset_dmrg_timing!()
 	energies, delta = f()
 	t = finish_dmrg_timing!()
