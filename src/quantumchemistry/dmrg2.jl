@@ -8,21 +8,27 @@ struct QCDMRG2 <: DMRGAlgorithm
 	trunc::TruncationDimCutoff
 	eigsolver::Symbol
 	davidson_max_subspace::Int
-	olsen_precond::Bool
+	davidson::Union{Nothing, DavidsonSolver}
 end
 
 # `toleig`: bond eigsolve convergence on ||Hψ - Eψ|| (KrylovKit `Lanczos.tol` / Davidson `conv_thrd`).
-QCDMRG2(trunc::TruncationDimCutoff; maxiter::Int=100, tol::Real=1.0e-14, maxitereig::Int=10, toleig::Real=1.0e-5, noise::Real=0, verbosity::Int=1,
-	eigsolver::Symbol=:davidson, davidson_max_subspace::Int=50, olsen_precond::Bool=false) = QCDMRG2(
-	maxiter, convert(Float64, tol), maxitereig, convert(Float64, toleig), convert(Float64, noise), verbosity, trunc,
-	eigsolver, davidson_max_subspace, olsen_precond)
+# `davidson`: optional `DavidsonSolver` (precond, subspace size, …); default uses `DavidsonSolver(deflation_max_size=davidson_max_subspace)`.
+function QCDMRG2(trunc::TruncationDimCutoff; maxiter::Int=100, tol::Real=1.0e-14, maxitereig::Int=10, toleig::Real=1.0e-5, noise::Real=1.0e-10, verbosity::Int=1,
+	eigsolver::Symbol=:davidson, davidson_max_subspace::Int=50, davidson::Union{Nothing, DavidsonSolver}=nothing)
+	eigsolver in (:davidson, :lanczos) ||
+		error("eigsolver must be :davidson or :lanczos; got $(eigsolver)")
+	return QCDMRG2(
+		maxiter, convert(Float64, tol), maxitereig, convert(Float64, toleig), convert(Float64, noise), verbosity, trunc,
+		eigsolver, davidson_max_subspace, davidson,
+	)
+end
 QCDMRG2(; trunc::TruncationDimCutoff=DMRG.DefaultTruncation, kwargs...) = QCDMRG2(trunc; kwargs...)
 
 Base.similar(x::QCDMRG2; trunc::TruncationDimCutoff=x.trunc, maxiter::Int=x.maxiter, tol::Float64=x.tol, maxitereig::Int=x.maxitereig,
 	toleig::Float64=x.toleig, verbosity::Int=x.verbosity, eigsolver::Symbol=x.eigsolver,
-	davidson_max_subspace::Int=x.davidson_max_subspace, olsen_precond::Bool=x.olsen_precond) = QCDMRG2(
+	davidson_max_subspace::Int=x.davidson_max_subspace, davidson::Union{Nothing, DavidsonSolver}=x.davidson) = QCDMRG2(
 	trunc=trunc, maxiter=maxiter, tol=tol, maxitereig=maxitereig, toleig=toleig, verbosity=verbosity,
-	eigsolver=eigsolver, davidson_max_subspace=davidson_max_subspace, olsen_precond=olsen_precond)
+	eigsolver=eigsolver, davidson_max_subspace=davidson_max_subspace, davidson=davidson)
 
 function Base.getproperty(x::QCDMRG2, s::Symbol)
 	if s == :D
@@ -60,18 +66,34 @@ function _assemble_heff!(Sleft, Sright, mpsA, mpsB)
 	return heff, x, Opleft, Opright
 end
 
-function _prepare_bond_heff!(env::QCDMRGCache, bond::Int, t)
+function _prepare_bond_heff!(env::QCDMRGCache, bond::Int, t; compute_aa::Bool=false)
 	Sleft, Sright, mpsA, mpsB = if t === nothing
 		_renormalize_bond_storages!(env, bond)
 	else
 		_timed!(() -> _renormalize_bond_storages!(env, bond), t, :tmve_heavy)
 	end
 	heff, x, Opleft, Opright = if t === nothing
-		_assemble_heff!(Sleft, Sright, mpsA, mpsB)
+		heff, x, Opleft, Opright = _assemble_heff!(Sleft, Sright, mpsA, mpsB)
+		if compute_aa
+			qc_diagonal_aa!(heff, renormalizedoperator(x))
+		end
+		heff, x, Opleft, Opright
 	else
-		_timed!(() -> _assemble_heff!(Sleft, Sright, mpsA, mpsB), t, :teff)
+		_timed!(() -> begin
+			heff, x, Opleft, Opright = _assemble_heff!(Sleft, Sright, mpsA, mpsB)
+			if compute_aa
+				qc_diagonal_aa!(heff, renormalizedoperator(x))
+			end
+			return heff, x, Opleft, Opright
+		end, t, :teff)
 	end
 	return heff, x, Opleft, Opright, mpsA, mpsB
+end
+
+function _needs_precond_aa(alg::QCDMRG2)
+	alg.eigsolver === :davidson || return false
+	cfg = something(alg.davidson, DavidsonSolver(deflation_max_size=alg.davidson_max_subspace))
+	return cfg.precond !== :none
 end
 
 """Initial guess on flat bond space (matches `QCCenter` `Hleft`/`Hright` layout)."""
@@ -81,7 +103,17 @@ function _eig_init(x)
 	return ψ0
 end
 
-function _lanczos_solver(heff, x, alg::QCDMRG2, bond::Int, t)
+function _log_bond_eig!(rec::BondEigRecord, alg::QCDMRG2, t, direction::String)
+	if t !== nothing
+		push!(t.bond_records, rec)
+	end
+	if alg.verbosity >= 2
+		print_bond_eig_record(rec; direction=direction, D=alg.D, tol=alg.toleig)
+	end
+	return rec
+end
+
+function _lanczos_solver(heff, x, alg::QCDMRG2, bond::Int, t, direction::String)
 	ψ0 = _eig_init(x)
 	lanczos = Lanczos(; maxiter=100, tol=alg.toleig, eager=true)
 	n_mv0 = t === nothing ? 0 : t.n_matvec
@@ -91,70 +123,42 @@ function _lanczos_solver(heff, x, alg::QCDMRG2, bond::Int, t)
 	else
 		_timed!(solve, t, :teig)
 	end
-	n_mv = t === nothing ? info.numops : t.n_matvec - n_mv0
+	nmv = t === nothing ? info.numops : t.n_matvec - n_mv0
 	normres = isempty(info.normres) ? NaN : info.normres[1]
-	rec = BondEigRecord(bond, eigenvalues[1], normres, n_mv, info.numiter, info.numops)
-	if t !== nothing
-		push!(t.bond_records, rec)
-	end
-	if alg.verbosity >= 2
-		b1, b2 = bond - 1, bond
-		@printf("  --> bond = %2d-%2d .. n_mv = %4d E = % .10f Error = %.2e (DavTol=%.0e)\n",
-			b1, b2, n_mv, rec.energy, bond_eig_error(rec), alg.toleig)
-	end
+	rec = BondEigRecord(bond, eigenvalues[1], normres, nmv, info.numiter)
+	_log_bond_eig!(rec, alg, t, direction)
 	return eigenvalues, eigenvecs, info
 end
 
-function _davidson_solver(heff::QCCenter, x, alg::QCDMRG2, bond::Int, t)
+function _davidson_solver(heff::QCCenter, x, alg::QCDMRG2, bond::Int, t, direction::String)
 	ψ0 = _eig_init(x)
+	cfg = something(alg.davidson, DavidsonSolver(deflation_max_size=alg.davidson_max_subspace))
 	solver = DavidsonSolver(;
 		conv_thrd=alg.toleig,
-		deflation_max_size=alg.davidson_max_subspace,
+		rel_conv_thrd=cfg.rel_conv_thrd,
+		max_iter=cfg.max_iter,
+		deflation_min_size=cfg.deflation_min_size,
+		deflation_max_size=cfg.deflation_max_size,
+		precond=cfg.precond,
 	)
-	precond_aa = if alg.olsen_precond
-		qc_diagonal_aa(heff, ψ0)
+	solve = () -> davidson_eigsolve(heff, ψ0, solver)
+	eigval, ψ_out, nmv, normres = if t === nothing
+		solve()
 	else
-		nothing
+		_timed!(solve, t, :teig)
 	end
-	n_mv0 = t === nothing ? 0 : t.n_matvec
-	solve = (precond_aa) -> davidson_eigsolve(heff, ψ0, solver; precond_aa=precond_aa)
-	eigval, ψ_out, n_mv_dav, normres = try
-		if t === nothing
-			solve(precond_aa)
-		else
-			_timed!(() -> solve(precond_aa), t, :teig)
-		end
-	catch err
-		if precond_aa === nothing
-			rethrow(err)
-		end
-		alg.verbosity >= 1 && @warn "Davidson Olsen failed; retrying without preconditioner" exception=err
-		if t === nothing
-			solve(nothing)
-		else
-			_timed!(() -> solve(nothing), t, :teig)
-		end
-	end
-	n_mv = t === nothing ? n_mv_dav : (t.n_matvec - n_mv0)
-	rec = BondEigRecord(bond, eigval, normres, n_mv, 0, n_mv)
-	if t !== nothing
-		push!(t.bond_records, rec)
-	end
-	if alg.verbosity >= 2
-		b1, b2 = bond - 1, bond
-		@printf("  --> bond = %2d-%2d .. n_mv = %4d E = % .10f Error = %.2e (DavTol=%.0e)\n",
-			b1, b2, n_mv, rec.energy, bond_eig_error(rec), alg.toleig)
-	end
+	rec = BondEigRecord(bond, eigval, normres, nmv, 0)
+	_log_bond_eig!(rec, alg, t, direction)
 	eigenvalues = [eigval]
 	eigenvecs = [ψ_out]
-	return eigenvalues, eigenvecs, (normres=normres, numops=n_mv)
+	return eigenvalues, eigenvecs, (normres=normres, numops=nmv)
 end
 
-function _bond_eigsolve(heff, x, alg::QCDMRG2, bond::Int, t)
+function _bond_eigsolve(heff, x, alg::QCDMRG2, bond::Int, t, direction::String)
 	if alg.eigsolver === :davidson
-		return _davidson_solver(heff, x, alg, bond, t)
+		return _davidson_solver(heff, x, alg, bond, t, direction)
 	elseif alg.eigsolver === :lanczos
-		return _lanczos_solver(heff, x, alg, bond, t)
+		return _lanczos_solver(heff, x, alg, bond, t, direction)
 	else
 		error("unknown eigsolver $(alg.eigsolver); use :davidson or :lanczos")
 	end
@@ -162,9 +166,9 @@ end
 
 function _optimize_bond_left!(env::QCDMRGCache, bond::Int, alg::QCDMRG2)
 	t = active_dmrg_timing()
-	heff, x, Opleft, _, _, _ = _prepare_bond_heff!(env, bond, t)
+	heff, x, Opleft, _, _, _ = _prepare_bond_heff!(env, bond, t; compute_aa=_needs_precond_aa(alg))
 
-	eigenvalues_0, eigenvecs_0, _ = _bond_eigsolve(heff, x, alg, bond, t)
+	eigenvalues_0, eigenvecs_0, _ = _bond_eigsolve(heff, x, alg, bond, t, "forward")
 	eigenvalue_0, eigenvec_0 = eigenvalues_0[1], eigenvecs_0[1]
 	eigenvec = TensorMap(blocks(eigenvec_0), codomain(x), domain(x))
 
@@ -229,9 +233,9 @@ end
 
 function _optimize_bond_right!(env::QCDMRGCache, bond::Int, alg::QCDMRG2)
 	t = active_dmrg_timing()
-	heff, x, _, Opright, _, mpsB = _prepare_bond_heff!(env, bond, t)
+	heff, x, _, Opright, _, mpsB = _prepare_bond_heff!(env, bond, t; compute_aa=_needs_precond_aa(alg))
 
-	eigenvalues_0, eigenvecs_0, _ = _bond_eigsolve(heff, x, alg, bond, t)
+	eigenvalues_0, eigenvecs_0, _ = _bond_eigsolve(heff, x, alg, bond, t, "backward")
 	eigenvalue_0, eigenvec_0 = eigenvalues_0[1], eigenvecs_0[1]
 	eigenvec = TensorMap(blocks(eigenvec_0), codomain(x), domain(x))
 

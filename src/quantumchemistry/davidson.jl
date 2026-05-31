@@ -7,9 +7,9 @@ Davidson for the lowest eigenpair of a Hermitian operator.
 **Terminology:**
 
 - **Davidson** — subspace iteration: Rayleigh–Ritz, residual, subspace expansion, deflate.
-- **Olsen preconditioner** — optional step inside Davidson (`olsen_precond=true`).
-- **`NoPrecond`** — Davidson without Olsen (`olsen_precond=false`, default).
-- **`DavidsonPrecond`** — alternate (diagonal divide only); not implemented here.
+- **`NoPrecond`** — `precond=:none`.
+- **`DavidsonPrecond`** — `precond=:davidson`: ``q_i ← q_i / (λ - aa_i)`` on ``diag(H_\\mathrm{eff})`` (``aa`` built in `Teff` via `qc_diagonal_aa!`).
+- **Olsen** — `precond=:olsen` (default): same ``aa`` plus projection (block2 `Normal`).
 
 `conv_thrd` is the threshold on ``||H\\psi - E\\psi||`` (same as `QCDMRG2.toleig`).
 
@@ -21,7 +21,10 @@ struct DavidsonSolver
 	max_iter::Int
 	deflation_min_size::Int
 	deflation_max_size::Int
+	precond::Symbol  # :none | :davidson | :olsen
 end
+
+const _DAVIDSON_PRECONDS = (:none, :davidson, :olsen)
 
 DavidsonSolver(;
 	conv_thrd::Real=1.0e-5,
@@ -29,13 +32,19 @@ DavidsonSolver(;
 	max_iter::Int=5000,
 	deflation_min_size::Int=2,
 	deflation_max_size::Int=50,
-) = DavidsonSolver(
-	convert(Float64, conv_thrd),
-	convert(Float64, rel_conv_thrd),
-	max_iter,
-	deflation_min_size,
-	deflation_max_size,
-)
+	precond::Symbol=:olsen,
+) = begin
+	precond in _DAVIDSON_PRECONDS ||
+		error("precond must be one of $(_DAVIDSON_PRECONDS); got $(precond)")
+	DavidsonSolver(
+		convert(Float64, conv_thrd),
+		convert(Float64, rel_conv_thrd),
+		max_iter,
+		deflation_min_size,
+		deflation_max_size,
+		precond,
+	)
+end
 
 function _tm_fill!(x::TensorMap, val::Real=0)
 	fill!(x, val)
@@ -98,7 +107,19 @@ function _set_coeffs!(x::TensorMap, v::AbstractVector)
 	return x
 end
 
-"""Olsen preconditioner. Uses subspace vector ``c`` (Ritz ``bs[ick]`` after transform)."""
+"""Diagonal preconditioner (block2 `DavidsonPrecond`): ``q_i ← q_i / (λ - aa_i)`` only."""
+function davidson_precondition_flat!(q::TensorMap, λ::Real, aa::AbstractVector{<:Real})
+	@assert length(aa) == dim(q)
+	qf = _vec_coeffs(q)
+	for i in eachindex(qf)
+		denom = λ - aa[i]
+		qf[i] = abs(denom) > 1e-12 ? qf[i] / denom : qf[i]
+	end
+	_set_coeffs!(q, qf)
+	return q
+end
+
+"""Olsen preconditioner (block2 `Normal`). Uses subspace vector ``c`` (Ritz ``bs[ick]`` after transform)."""
 function olsen_precondition_flat!(q::TensorMap, c::TensorMap, λ::Real, aa::AbstractVector{<:Real})
 	@assert length(aa) == dim(q)
 	qf = _vec_coeffs(q)
@@ -120,42 +141,25 @@ function olsen_precondition_flat!(q::TensorMap, c::TensorMap, λ::Real, aa::Abst
 	return q
 end
 
-"""Product diagonal for Olsen.
-
-``aa_i = \\langle e_i | H_\\mathrm{left} + H_\\mathrm{right} | e_i \\rangle`` on the bond tensor
-(one-sided applies only; cross terms are off-diagonal in this basis).
-"""
-function qc_diagonal_aa(heff::QCCenter, template::TensorMap)
-	aa = Vector{Float64}(undef, dim(template))
-	idx = 1
-	tmp = similar(template)
-	σ = similar(template)
-	for (key, _) in blocks(template)
-		n = length(blocks(template)[key])
-		for i in 1:n
-			_tm_fill!(tmp, 0)
-			blocks(tmp)[key][i] = 1
-			mul!(σ, heff.Hleft, tmp, true, false)
-			mul!(σ, tmp, heff.Hright, true, true)
-			aa[idx] = real(dot(tmp, σ))
-			idx += 1
-		end
-	end
-	return aa
-end
-
+"""MGS vs current subspace after precond (block2 `davidson`: `-⟨b_j|q⟩`, Ritz basis orthonormal)."""
 function _orthog_subtract!(q::TensorMap, bs, m::Int)
 	for j in 1:m
-		nrm2 = real(dot(bs[j], bs[j]))
-		if abs(nrm2) > 1e-30
-			_tm_axpy!(-real(dot(bs[j], q)) / nrm2, bs[j], q)
-		end
+		_tm_axpy!(-real(dot(bs[j], q)), bs[j], q)
 	end
 	return q
 end
 
-function davidson_eigsolve(op, v0::TensorMap, solver::DavidsonSolver=DavidsonSolver();
-		precond_aa=nothing)
+function davidson_eigsolve(op, v0::TensorMap, solver::DavidsonSolver=DavidsonSolver())
+	precond = solver.precond
+	precond_aa = if precond === :none
+		nothing
+	else
+		op isa QCCenter || error("precond=$(precond) requires op to be QCCenter")
+		aa = op.diag_aa
+		(aa !== nothing && length(aa) == dim(v0)) ||
+			error("precond=$(precond) requires heff.diag_aa from qc_diagonal_aa! during bond Heff assembly")
+		aa
+	end
 	maxm = solver.deflation_max_size
 	bs = [similar(v0) for _ in 1:maxm]
 	sigmas = [similar(v0) for _ in 1:maxm]
@@ -167,10 +171,11 @@ function davidson_eigsolve(op, v0::TensorMap, solver::DavidsonSolver=DavidsonSol
 
 	m = 1
 	msig = 0
-	n_mv = 0
+	ndav = 0
 	eigval = 0.0
 	ick = 1
 	res_norm = Inf
+	res_norm_sq = Inf
 	converged = false
 
 	q = similar(v0)
@@ -179,7 +184,7 @@ function davidson_eigsolve(op, v0::TensorMap, solver::DavidsonSolver=DavidsonSol
 		while msig < m
 			msig += 1
 			mul!(sigmas[msig], op, bs[msig])
-			n_mv += 1
+			ndav += 1
 		end
 
 		Hproj = Matrix{Float64}(undef, m, m)
@@ -196,30 +201,35 @@ function davidson_eigsolve(op, v0::TensorMap, solver::DavidsonSolver=DavidsonSol
 		copy!(q, sigmas[ick])
 		_tm_axpy!(-eigval, bs[ick], q)
 
-		res_norm = norm(q)
-		threshold = solver.conv_thrd + abs(eigval) * solver.rel_conv_thrd
-		if res_norm < threshold
+		res_norm_sq = norm(q)^2
+		threshold_sq = solver.conv_thrd^2 +
+			abs(eigval)^2 * solver.rel_conv_thrd^2
+		if res_norm_sq < threshold_sq
 			converged = true
+			res_norm = sqrt(res_norm_sq)
 			break
 		end
 
+		# block2 regular davidson: precond → deflate if full → orthog vs bs → normalize → add
+		if precond === :davidson
+			davidson_precondition_flat!(q, eigval, precond_aa)
+		elseif precond === :olsen
+			olsen_precondition_flat!(q, bs[ick], eigval, precond_aa)
+		end
 		if m >= solver.deflation_max_size
 			m = msig = solver.deflation_min_size
-			continue
-		end
-
-		if precond_aa !== nothing
-			olsen_precondition_flat!(q, bs[ick], eigval, precond_aa)
 		end
 		_orthog_subtract!(q, bs, m)
 		nq = norm(q)
-		if nq < 1e-14
-			m = msig = solver.deflation_min_size
-			continue
-		end
+		(nq > 1e-30) || continue
 		scale!(q, 1 / nq)
 		m += 1
 		copy!(bs[m], q)
+		res_norm = nq
+	end
+
+	if !converged
+		res_norm = sqrt(res_norm_sq)
 	end
 
 	converged || error(
@@ -230,5 +240,5 @@ function davidson_eigsolve(op, v0::TensorMap, solver::DavidsonSolver=DavidsonSol
 	ψ_out = similar(v0)
 	copy!(ψ_out, bs[ick])
 	_tm_normalize!(ψ_out)
-	return eigval, ψ_out, n_mv, res_norm
+	return eigval, ψ_out, ndav, res_norm
 end

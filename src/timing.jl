@@ -3,25 +3,24 @@ using Printf
 """
 Per half-sweep timings.
 
-- `Teff`: assemble `QCCenter` (`renormalizedstorage` + `terms`)
-- `Teig`: Davidson (default, Olsen) / Lanczos — includes all `H|ψ⟩` matvec at bond eigsolve
+- `Teff`: assemble `QCCenter` (`renormalizedstorage` + `terms`) and `qc_diagonal_aa!` when preconditioning is on
+- `Teig`: Davidson (default, Olsen) / Lanczos — `H|ψ⟩` matvecs at bond eigsolve (`nmv`)
 - `Tmve`: environment shift (`renormalizestorage*`) + post-SVD `updatestoragerenormalize*` / `setstorage!`
 - `Tsvd`: two-site SVD truncation
 - `Tsplt`: split / merge MPS after SVD (normalize, bond tensors, energy check)
 
-`BondEigRecord`: per-bond Lanczos stats.
+`BondEigRecord`: per-bond eigsolve stats (`nmv` = solver matvecs).
 """
 struct BondEigRecord
 	bond::Int
 	energy::Float64
 	normres::Float64
-	n_mv::Int
+	nmv::Int
 	numiter::Int
-	numops::Int
 end
 
 # `toleig`: stop when ||Hψ - Eψ|| < toleig (same as KrylovKit `Lanczos.tol`).
-bond_eig_error(rec::BondEigRecord) = rec.normres
+bond_eig_resnorm(rec::BondEigRecord) = rec.normres
 
 mutable struct DMRGTiming
 	teff::Float64
@@ -98,18 +97,28 @@ function print_dmrg_sweep_timing(st::DMRGSweepTiming; io::IO=stdout, prefix::Str
 	return st
 end
 
-function print_bond_eig_records(records::Vector{BondEigRecord}; io::IO=stdout, prefix::String="", direction::String="", D::Int=0)
+function print_bond_eig_record(rec::BondEigRecord; io::IO=stdout, prefix::String="", direction::String="", D::Int=0, tol::Union{Real,Nothing}=nothing)
 	arrow = direction == "backward" ? "<--" : "-->"
+	b1, b2 = rec.bond - 1, rec.bond
+	if tol === nothing
+		@printf(io, "%s%s bond = %2d-%2d .. D = %4d nmv = %4d E = % .10f resnorm = %.2e\n",
+			prefix, arrow, b1, b2, D, rec.nmv, rec.energy, bond_eig_resnorm(rec))
+	else
+		@printf(io, "%s%s bond = %2d-%2d .. D = %4d nmv = %4d E = % .10f resnorm = %.2e (tol=%.0e)\n",
+			prefix, arrow, b1, b2, D, rec.nmv, rec.energy, bond_eig_resnorm(rec), tol)
+	end
+	return rec
+end
+
+function print_bond_eig_records(records::Vector{BondEigRecord}; io::IO=stdout, prefix::String="", direction::String="", D::Int=0, tol::Union{Real,Nothing}=nothing)
 	for rec in records
-		b1, b2 = rec.bond - 1, rec.bond
-		@printf(io, "%s%s bond = %2d-%2d .. D = %4d n_mv = %4d E = % .10f Error = %.2e (DavTol)\n",
-			prefix, arrow, b1, b2, D, rec.n_mv, rec.energy, bond_eig_error(rec))
+		print_bond_eig_record(rec; io=io, prefix=prefix, direction=direction, D=D, tol=tol)
 	end
 	return records
 end
 
-function print_bond_eig_sweep(st::DMRGSweepTiming; io::IO=stdout, prefix::String="", D::Int=0)
-	print_bond_eig_records(st.forward.bond_records; io=io, prefix=prefix, direction="forward", D=D)
-	print_bond_eig_records(st.backward.bond_records; io=io, prefix=prefix, direction="backward", D=D)
+function print_bond_eig_sweep(st::DMRGSweepTiming; io::IO=stdout, prefix::String="", D::Int=0, tol::Union{Real,Nothing}=nothing)
+	print_bond_eig_records(st.forward.bond_records; io=io, prefix=prefix, direction="forward", D=D, tol=tol)
+	print_bond_eig_records(st.backward.bond_records; io=io, prefix=prefix, direction="backward", D=D, tol=tol)
 	return st
 end
