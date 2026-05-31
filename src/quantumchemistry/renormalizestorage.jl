@@ -122,15 +122,20 @@ function renormalizestorageright(ham::MolecularHamiltonian, spacer::ElementarySp
 
 	A = ratensortype(spacetype(hnew), storagetype(hnew))
 	id_right = isomorphism(storagetype(hnew), spacer, spacer)
+	ops = SiteOps(sc)
+	tmcache = TensorMapCache()
 
 	PAnew = Matrix{A}(undef, 2, 2)
 	for (idxr, orbr) in enumerate(sc)
-		op_r = sqC(sc, idxr, false)
+		op_r = site_ann(ops, idxr)
 		for (idxs, orbs) in enumerate(sc)
-			op_s = sqC(sc, idxs, false)
+			op_s = site_ann(ops, idxs)
 			if orbr < orbs
 				op_rs = op_r * op_s
-				PAnew[idxr, idxs] = renormalizeright(id_right, totensormap(op_rs, side=:R))
+				PAnew[idxr, idxs] = renormalizeright(
+					id_right,
+					cached_tensormap!(tmcache, (:ann_ann, idxr, idxs), op_rs; side=:R),
+				)
 			end
 		end
 	end
@@ -140,9 +145,9 @@ function renormalizestorageright(ham::MolecularHamiltonian, spacer::ElementarySp
 			if orbp <= orbr
 				op_qs = scratch_empty()
 				for (idxq, orbq) in enumerate(sc)
-					op_q = sqC(sc, idxq, true)
+					op_q = site_adag(ops, idxq)
 					for (idxs, orbs) in enumerate(sc)
-						op_s = sqC(sc, idxs, false)
+						op_s = site_ann(ops, idxs)
 						op_qs += h2e[orbp, orbq, orbr, orbs] * op_q * op_s
 					end
 				end
@@ -156,12 +161,12 @@ function renormalizestorageright(ham::MolecularHamiltonian, spacer::ElementarySp
 	for (idxp, orbp) in enumerate(sl)
 		op_qrs = scratch_empty()
 		for (idxq, orbq) in enumerate(sc)
-			op_q = sqC(sc, idxq, true)
-			op_qrs += h1e[orbp, orbq] * sqC(sc, idxq, false)
+			op_q = site_adag(ops, idxq)
+			op_qrs += h1e[orbp, orbq] * site_ann(ops, idxq)
 			for (idxr, orbr) in enumerate(sc)
-				op_r = sqC(sc, idxr, false)
+				op_r = site_ann(ops, idxr)
 				for (idxs, orbs) in enumerate(sc)
-					op_s = sqC(sc, idxs, false)
+					op_s = site_ann(ops, idxs)
 					if orbr < orbs
 						op_qrs += h2e[orbp, orbq, orbr, orbs] * op_q * op_r * op_s
 					end
@@ -175,8 +180,10 @@ function renormalizestorageright(ham::MolecularHamiltonian, spacer::ElementarySp
 
 	Tanew = Vector{A}(undef, 2)
 	for (idxs, orbs) in enumerate(sc)
-		op_s = sqC(sc, idxs, false)
-		Tanew[idxs] = renormalizeright(id_right, totensormap(op_s, side=:R))
+		Tanew[idxs] = renormalizeright(
+			id_right,
+			cached_tensormap!(tmcache, (:ann, idxs), site_ann(ops, idxs); side=:R),
+		)
 	end
 
 	return QCSiteStorages(hnew, BQnew, PAnew, aTnew, Tanew)
@@ -192,6 +199,8 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 
 	A = ratensortype(spacetype(Hold), storagetype(Hold))
 	id_right = isomorphism(storagetype(Hold), spacer, spacer)
+	ops = SiteOps(sc)
+	tmcache = TensorMapCache()
 
 	@assert length(adagTold) == nl + 2
 	@assert length(Tdagaold) == nr 
@@ -209,18 +218,22 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 		end
 	end
 	for (idxr, orbr) in enumerate(sc)
-		op_r = sqC(sc, idxr, false) * sgnC(sc)
+		op_r = site_ann(ops, idxr) * ops.sgn
+		tmp_r = cached_tensormap!(tmcache, (:ann_sgn, idxr), op_r; side=:R)
 		for (idxs, orbs) in enumerate(sr)
-			PAnew[idxr, idxs+2] = renormalizeright(Tdagaold[idxs], totensormap(op_r, side=:R))
+			PAnew[idxr, idxs+2] = renormalizeright(Tdagaold[idxs], tmp_r)
 		end
 	end
 	for (idxr, orbr) in enumerate(sc)
-		op_r = sqC(sc, idxr, false)
+		op_r = site_ann(ops, idxr)
 		for (idxs, orbs) in enumerate(sc)
-			op_s = sqC(sc, idxs, false)
+			op_s = site_ann(ops, idxs)
 			if orbr < orbs
 				op_rs = op_r * op_s
-				PAnew[idxr, idxs] = renormalizeright(id_right, totensormap(op_rs, side=:R))
+				PAnew[idxr, idxs] = renormalizeright(
+					id_right,
+					cached_tensormap!(tmcache, (:ann_ann, idxr, idxs), op_rs; side=:R),
+				)
 			end
 			
 		end
@@ -235,9 +248,9 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 				end
 				op_qs = scratch_empty()
 				for (idxq, orbq) in enumerate(sc)
-					op_q = sqC(sc, idxq, true)
+					op_q = site_adag(ops, idxq)
 					for (idxs, orbs) in enumerate(sc)
-						op_s = sqC(sc, idxs, false)
+						op_s = site_ann(ops, idxs)
 						op_qs += h2e[orbp, orbq, orbr, orbs] * op_q * op_s
 					end
 				end
@@ -250,11 +263,12 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 				end
 
 				for (idxq, orbq) in enumerate(sc)
-					op_q = sqC(sc, idxq, true)
+					op_q = site_adag(ops, idxq)
+					op_q_sgn = cached_tensormap!(tmcache, (:adag_sgn, idxq), op_q * ops.sgn; side=:R)
 					for (idxs, orbs) in enumerate(sr)
 						coef = h2e[orbp, orbq, orbr, orbs]
 						if !iszero(coef)
-							tmp = totensormap(coef * op_q * sgnC(sc), side=:R)
+							tmp = coef * op_q_sgn
 							if isassigned(BQnew, orbp, orbr)
 								BQnew[orbp, orbr] = renormalizeright!(BQnew[orbp, orbr], Tdagaold[idxs], tmp)
 							else									
@@ -265,10 +279,11 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 				end
 				for (idxq, orbq) in enumerate(sr)
 					for (idxs, orbs) in enumerate(sc)
-						op_s = sqC(sc, idxs, false)
+						op_s = site_ann(ops, idxs)
+						op_s_sgn = cached_tensormap!(tmcache, (:ann_sgn, idxs), op_s * ops.sgn; side=:R)
 						coef = h2e[orbp, orbq, orbr, orbs]
 						if (!iszero(coef)) && (dim(Tdagaold[idxq]) != 0)
-							tmp = totensormap(-coef * op_s * sgnC(sc), side=:R)
+							tmp = -coef * op_s_sgn
 							if isassigned(BQnew, orbp, orbr)
 								# BQnew[orbp, orbr] = renormalizeright!(BQnew[orbp, orbr], phy_dagger(Tdagaold[idxq]), tmp)
 								BQnew[orbp, orbr] = renormalizeright!(BQnew[orbp, orbr], Tdagaold[idxq], tmp, dagger=true)
@@ -293,13 +308,13 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 
 		op_qrs = scratch_empty()
 		for (idxq, orbq) in enumerate(sc)
-			op_q = sqC(sc, idxq, true)
-			op_qrs += h1e[orbp, orbq] * sqC(sc, idxq, false)
+			op_q = site_adag(ops, idxq)
+			op_qrs += h1e[orbp, orbq] * site_ann(ops, idxq)
 			for (idxr, orbr) in enumerate(sc)
-				op_r = sqC(sc, idxr, false)
+				op_r = site_ann(ops, idxr)
 				op_qr = op_q * op_r
 				for (idxs, orbs) in enumerate(sc)
-					op_s = sqC(sc, idxs, false)
+					op_s = site_ann(ops, idxs)
 					if orbr < orbs
 						op_qrs += h2e[orbp, orbq, orbr, orbs] * op_qr * op_s
 					end
@@ -315,16 +330,17 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 		end
 
 		for (idxq, orbq) in enumerate(sc)
-			op_q = sqC(sc, idxq, true)
+			op_q = site_adag(ops, idxq)
+			op_q_t = cached_tensormap!(tmcache, (:adag, idxq), op_q; side=:R)
 			for (idxr, orbr) in enumerate(sr)
 				for (idxs, orbs) in enumerate(sr)
 					if orbr < orbs
 						coef = h2e[orbp, orbq, orbr, orbs]
 						if !iszero(coef)
 							if isassigned(aTnew, idxp)
-								aTnew[idxp] = renormalizeright!(aTnew[idxp], PAold[idxr, idxs], totensormap(coef * op_q, side=:R))
+								aTnew[idxp] = renormalizeright!(aTnew[idxp], PAold[idxr, idxs], coef * op_q_t)
 							else
-								aTnew[idxp] = renormalizeright(PAold[idxr, idxs], totensormap(coef * op_q, side=:R))
+								aTnew[idxp] = renormalizeright(PAold[idxr, idxs], coef * op_q_t)
 							end
 						end
 					end
@@ -334,11 +350,11 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 		for (idxq, orbq) in enumerate(sr)
 			op_rs = scratch_empty()
 			for (idxr, orbr) in enumerate(sc)
-				op_r = sqC(sc, idxr, false)
+				op_r = site_ann(ops, idxr)
 				for (idxs, orbs) in enumerate(sc)
 					if orbr < orbs
-						op_s = sqC(sc, idxs, false)
-						op_rs += h2e[orbp, orbq, orbr, orbs] * op_r * op_s * sgnC(sc)
+						op_s = site_ann(ops, idxs)
+						op_rs += h2e[orbp, orbq, orbr, orbs] * op_r * op_s * ops.sgn
 					end
 				end
 			end
@@ -355,10 +371,10 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 		for (idxs, orbs) in enumerate(sr)
 			for (idxq, orbq) in enumerate(sc)
 				op_qr = scratch_empty()
-				op_q = sqC(sc, idxq, true)
+				op_q = site_adag(ops, idxq)
 				for (idxr, orbr) in enumerate(sc)
-					op_r = sqC(sc, idxr, false)
-					op_qr += h2e[orbp, orbq, orbr, orbs] * op_q * op_r * sgnC(sc)
+					op_r = site_ann(ops, idxr)
+					op_qr += h2e[orbp, orbq, orbr, orbs] * op_q * op_r * ops.sgn
 				end
 				if !iszero(op_qr)
 					if isassigned(aTnew, idxp)
@@ -370,8 +386,7 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 			end
 		end
 		for (idxr, orbr) in enumerate(sc)
-			op_r = sqC(sc, idxr, false)
-			tmp = -totensormap(op_r, side=:R)
+			tmp = -cached_tensormap!(tmcache, (:ann, idxr), site_ann(ops, idxr); side=:R)
 			if isassigned(BQold, orbp, orbr)
 				if orbp < orbr
 					if isassigned(aTnew, idxp)
@@ -396,8 +411,10 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 		Tanew[idxs + 2] = renormalizeright(Tdagaold[idxs], nothing)
 	end
 	for (idxs, orbs) in enumerate(sc)
-		op_s = sqC(sc, idxs, false)
-		Tanew[idxs] = renormalizeright(id_right, totensormap(op_s, side=:R))
+		Tanew[idxs] = renormalizeright(
+			id_right,
+			cached_tensormap!(tmcache, (:ann, idxs), site_ann(ops, idxs); side=:R),
+		)
 	end
 
 	hnew = renormalizeHright(storage_old, ham, site, spacer)
@@ -420,11 +437,19 @@ updatestorageright(env::QCDMRGCache, site::Int, mpsj::MPSSiteTensor=env.mps[site
 function _updateright_all(storages::Vector, mpsj, workspace::Vector)
 	A = mpstensortype(spacetype(mpsj), storagetype(mpsj))
 	r = Vector{A}(undef, size(storages))
+	if Threads.nthreads() == 1
+		for i in eachindex(storages)
+			if isassigned(storages, i)
+				r[i] = updaterenormalizeright(storages[i], mpsj, mpsj, workspace)
+			end
+		end
+		return r
+	end
 	indices = Int[]
 	for i in eachindex(storages)
 		isassigned(storages, i) && push!(indices, i)
 	end
-	if Threads.nthreads() > 1 && length(indices) >= MIN_RENORM_TASKS_FOR_THREADS
+	if length(indices) >= MIN_RENORM_TASKS_FOR_THREADS
 		Threads.@threads for i in indices
 			ws = scratch_workspace!(mpsj)
 			r[i] = updaterenormalizeright(storages[i], mpsj, mpsj, ws)
@@ -440,11 +465,19 @@ function _updateright_all(storages::Matrix, mpsj, workspace::Vector)
 	A = mpstensortype(spacetype(mpsj), storagetype(mpsj))
 	r = Matrix{A}(undef, size(storages))
 	n = size(storages, 1)
+	if Threads.nthreads() == 1
+		for i in 1:n, j in i:n
+			if isassigned(storages, i, j)
+				r[i, j] = updaterenormalizeright(storages[i, j], mpsj, mpsj, workspace)
+			end
+		end
+		return r
+	end
 	tasks = NTuple{2,Int}[]
 	for i in 1:n, j in i:n
 		isassigned(storages, i, j) && push!(tasks, (i, j))
 	end
-	if Threads.nthreads() > 1 && length(tasks) >= MIN_RENORM_TASKS_FOR_THREADS
+	if length(tasks) >= MIN_RENORM_TASKS_FOR_THREADS
 		Threads.@threads for (i, j) in tasks
 			ws = scratch_workspace!(mpsj)
 			r[i, j] = updaterenormalizeright(storages[i, j], mpsj, mpsj, ws)
@@ -648,6 +681,8 @@ function renormalizestorageleft(storage_old::QCSiteStorages, ham::MolecularHamil
 
 	A = ratensortype(spacetype(Hold), storagetype(Hold))
 	id_left = isomorphism(storagetype(Hold), spacel, spacel)
+	ops = SiteOps(sc)
+	tmcache = TensorMapCache()
 
 	@assert length(adagTold) == nl
 	@assert length(Tdagaold) == nr + 2
@@ -669,19 +704,24 @@ function renormalizestorageleft(storage_old::QCSiteStorages, ham::MolecularHamil
 		end
 	end
 	for (idxp, orbp) in enumerate(sc)
-		op_p = sqC(sc, idxp, true)
+		op_p = site_adag(ops, idxp)
 		for (idxr, orbr) in enumerate(sc)
 			if orbp <= orbr
-				op_r = sqC(sc, idxr, false)
+				op_r = site_ann(ops, idxr)
 				op_pr = op_p * op_r
-				BQnew[orbp, orbr] = renormalizeleft(id_left, totensormap(op_pr, side=:L))
+				BQnew[orbp, orbr] = renormalizeleft(
+					id_left,
+					cached_tensormap!(tmcache, (:adag_ann, idxp, idxr), op_pr; side=:L),
+				)
 			end
 		end
 	end		
 	for (idxp, orbp) in enumerate(sl)
 		for (idxr, orbr) in enumerate(sc)
-			op_r = sqC(sc, idxr, false)
-			BQnew[orbp, orbr] = renormalizeleft(adagTold[idxp], totensormap(op_r, side=:L))
+			BQnew[orbp, orbr] = renormalizeleft(
+				adagTold[idxp],
+				cached_tensormap!(tmcache, (:ann, idxr), site_ann(ops, idxr); side=:L),
+			)
 		end
 	end
 
@@ -691,8 +731,11 @@ function renormalizestorageleft(storage_old::QCSiteStorages, ham::MolecularHamil
 		aTnew[orbp] = renormalizeleft(adagTold[idxp], nothing)
 	end
 	for (idxp, orbp) in enumerate(sc)
-		op_p = sqC(sc, idxp, true) * sgnC(sc)
-		aTnew[orbp] = renormalizeleft(id_left, totensormap(op_p, side=:L))
+		op_p = site_adag(ops, idxp) * ops.sgn
+		aTnew[orbp] = renormalizeleft(
+			id_left,
+			cached_tensormap!(tmcache, (:adag_sgn, idxp), op_p; side=:L),
+		)
 	end
 	# update Ta storage
 	Tanew = Vector{A}(undef, nr)
@@ -704,13 +747,13 @@ function renormalizestorageleft(storage_old::QCSiteStorages, ham::MolecularHamil
 	for (idxs, orbs) in enumerate(sr)
 		op_pqr = scratch_empty()
 		for (idxp, orbp) in enumerate(sc)
-			op_p = sqC(sc, idxp, true)
+			op_p = site_adag(ops, idxp)
 			for (idxq, orbq) in enumerate(sc)
-				op_q = sqC(sc, idxq, true)
+				op_q = site_adag(ops, idxq)
 				if orbp < orbq
 					op_pq = op_p * op_q
 					for (idxr, orbr) in enumerate(sc)
-						op_r = sqC(sc, idxr, false)
+						op_r = site_ann(ops, idxr)
 						op_pqr += h2e[orbp, orbq, orbr, orbs] * op_pq * op_r
 					end
 				end
@@ -727,12 +770,13 @@ function renormalizestorageleft(storage_old::QCSiteStorages, ham::MolecularHamil
 	end
 	for (idxs, orbs) in enumerate(sr)
 		for (idxr, orbr) in enumerate(sc)
-			op_r = sqC(sc, idxr, false) * sgnC(sc)
+			op_r = site_ann(ops, idxr) * ops.sgn
+			op_r_t = cached_tensormap!(tmcache, (:ann_sgn, idxr), op_r; side=:L)
 			if isassigned(PAold, idxr, idxs+2)
 				if isassigned(Tanew, idxs)
-					Tanew[idxs] = renormalizeleft!(Tanew[idxs], PAold[idxr, idxs+2], totensormap(op_r, side=:L))
+					Tanew[idxs] = renormalizeleft!(Tanew[idxs], PAold[idxr, idxs+2], op_r_t)
 				else
-					Tanew[idxs] = renormalizeleft(PAold[idxr, idxs+2], totensormap(op_r, side=:L))
+					Tanew[idxs] = renormalizeleft(PAold[idxr, idxs+2], op_r_t)
 				end
 			end
 		end
@@ -740,9 +784,9 @@ function renormalizestorageleft(storage_old::QCSiteStorages, ham::MolecularHamil
 		for (idxr, orbr) in enumerate(sl)
 			op_qp = scratch_empty()
 			for (idxp, orbp) in enumerate(sc)
-				op_p = sqC(sc, idxp, false)
+				op_p = site_ann(ops, idxp)
 				for (idxq, orbq) in enumerate(sc)
-					op_q = sgnC(sc) * sqC(sc, idxq, false) 
+					op_q = ops.sgn * site_ann(ops, idxq)
 					if orbp < orbq
 						op_qp -= h2e[orbp, orbq, orbr, orbs] * op_q * op_p
 					end
@@ -764,9 +808,9 @@ function renormalizestorageleft(storage_old::QCSiteStorages, ham::MolecularHamil
 		for (idxp, orbp) in enumerate(sl)
 			op_qr = scratch_empty()
 			for (idxq, orbq) in enumerate(sc)
-				op_q = sqC(sc, idxq, true)
+				op_q = site_adag(ops, idxq)
 				for (idxr, orbr) in enumerate(sc)
-					op_r = sqC(sc, idxr, false) * sgnC(sc)
+					op_r = site_ann(ops, idxr) * ops.sgn
 					op_qr += h2e[orbp, orbq, orbr, orbs] * op_q * op_r
 				end
 			end
@@ -780,12 +824,13 @@ function renormalizestorageleft(storage_old::QCSiteStorages, ham::MolecularHamil
 		end
 
 		for (idxq, orbq) in enumerate(sc)
-			op_q = sqC(sc, idxq, true)
+			op_q = site_adag(ops, idxq)
+			op_q_sgn_t = cached_tensormap!(tmcache, (:adag_sgn, idxq), op_q * ops.sgn; side=:L)
 			for (idxp, orbp) in enumerate(sl)
 				for (idxr, orbr) in enumerate(sl)
 					coef = h2e[orbp, orbq, orbr, orbs]
 					if !iszero(coef)
-						tmp = totensormap(-coef * op_q * sgnC(sc), side=:L)
+						tmp = -coef * op_q_sgn_t
 						if orbp < orbr
 							if isassigned(Tanew, idxs)
 								Tanew[idxs] = renormalizeleft!(Tanew[idxs], BQold[idxp, idxr], tmp)
@@ -833,11 +878,19 @@ updatestorageleft(env::QCDMRGCache, site::Int, mpsj::MPSTensor=env.mps[site]) = 
 function _updateleft_all(storages::Vector, mpsj, workspace::Vector)
 	A = mpstensortype(spacetype(mpsj), storagetype(mpsj))
 	r = Vector{A}(undef, size(storages))
+	if Threads.nthreads() == 1
+		for i in eachindex(storages)
+			if isassigned(storages, i)
+				r[i] = updaterenormalizeleft(storages[i], mpsj, mpsj, workspace)
+			end
+		end
+		return r
+	end
 	indices = Int[]
 	for i in eachindex(storages)
 		isassigned(storages, i) && push!(indices, i)
 	end
-	if Threads.nthreads() > 1 && length(indices) >= MIN_RENORM_TASKS_FOR_THREADS
+	if length(indices) >= MIN_RENORM_TASKS_FOR_THREADS
 		Threads.@threads for i in indices
 			ws = scratch_workspace!(mpsj)
 			r[i] = updaterenormalizeleft(storages[i], mpsj, mpsj, ws)
@@ -853,11 +906,19 @@ function _updateleft_all(storages::Matrix, mpsj, workspace::Vector)
 	A = mpstensortype(spacetype(mpsj), storagetype(mpsj))
 	r = Matrix{A}(undef, size(storages))
 	n = size(storages, 1)
+	if Threads.nthreads() == 1
+		for i in 1:n, j in i:n
+			if isassigned(storages, i, j)
+				r[i, j] = updaterenormalizeleft(storages[i, j], mpsj, mpsj, workspace)
+			end
+		end
+		return r
+	end
 	tasks = NTuple{2,Int}[]
 	for i in 1:n, j in i:n
 		isassigned(storages, i, j) && push!(tasks, (i, j))
 	end
-	if Threads.nthreads() > 1 && length(tasks) >= MIN_RENORM_TASKS_FOR_THREADS
+	if length(tasks) >= MIN_RENORM_TASKS_FOR_THREADS
 		Threads.@threads for (i, j) in tasks
 			ws = scratch_workspace!(mpsj)
 			r[i, j] = updaterenormalizeleft(storages[i, j], mpsj, mpsj, ws)
@@ -871,8 +932,8 @@ function _updateleft_all(storages::Matrix, mpsj, workspace::Vector)
 end
 
 # function phy_dagger(t::RATensor)
-#     t′ = t'
-#     return flip2(permute(t′, (1,2,5), (3,4)))
+#     t? = t'
+#     return flip2(permute(t?, (1,2,5), (3,4)))
 # end
 # function flip2(t::RATensor)
 #     vspace = space(t, 3)
@@ -880,16 +941,21 @@ end
 #     @tensor t2[3,4,1;5,6] := F[1,2] * t[3,4,2,5,6]
 # end
 # function phy_dagger(t::RATensor)
-#     t′ = t'
-#     vspace = space(t′, 5)
+#     t? = t'
+#     vspace = space(t?, 5)
 #     F = isomorphism(storagetype(t), flip(vspace), vspace)
-#     @tensor r[3,4,1;5,6] := F[1,2] * t′[3,4,5,6,2]
-#     # return flip2(permute(t′, (1,2,5), (3,4)))
+#     @tensor r[3,4,1;5,6] := F[1,2] * t?[3,4,5,6,2]
+#     # return flip2(permute(t?, (1,2,5), (3,4)))
 # end
 
 function renormalizeleft_odagger(hold::MPSTensor, mpoj::MPSTensor)
-    mspace = fuse(space(mpoj, 2), space(hold, 2))       
-    hnew = RATensor(zeros, scalartype(hold), space(hold, 3)' ⊗ space(mpoj, 3)' ⊗ mspace', space(hold, 1) ⊗ space(mpoj, 1))        	
+    tensorprod = getfield(@__MODULE__, Symbol("\u2297"))
+    mspace = fuse(space(mpoj, 2), space(hold, 2))
+    hnew = scratch_rtensor!(
+        scalartype(hold),
+        tensorprod(tensorprod(space(hold, 3)', space(mpoj, 3)'), mspace'),
+        tensorprod(space(hold, 1), space(mpoj, 1)),
+    )
     return renormalizeleft_odagger!(hnew, hold, mpoj)
 end
 
@@ -898,7 +964,8 @@ function renormalizeleft_odagger2!(hnew::RATensor, hold::MPSTensor, mpoj::MPSTen
         (space(hnew, 1)' == space(hold, 3)) && (space(hnew, 2)' == space(mpoj, 3)) || throw(SpaceMismatch())
     (dim(space(hnew, 3)) == dim(space(hold, 2)) == dim(space(mpoj, 2)) == 1) || throw(ArgumentError("middle space should be singlet"))
 
-    tmp = DMRG.loose_isometry(storagetype(hnew), space(hnew, 3)', space(hold, 2) ⊗ space(mpoj, 2) )
+    tensorprod = getfield(@__MODULE__, Symbol("\u2297"))
+    tmp = DMRG.loose_isometry(storagetype(hnew), space(hnew, 3)', tensorprod(space(hold, 2), space(mpoj, 2)))
     @tensor hnew[3,6,7;1,4] += conj(hold[1,2,3]) * conj(mpoj[4,5,6]) * conj(tmp[7,2,5])
 	return hnew
 end
@@ -907,27 +974,29 @@ function renormalizeleft_odagger!(hnew::RATensor, hold::MPSTensor, mpoj::MPSTens
         (space(hnew, 1)' == space(hold, 3)) && (space(hnew, 2)' == space(mpoj, 3)) || throw(SpaceMismatch())
     (dim(space(hnew, 3)) == dim(space(hold, 2)) == dim(space(mpoj, 2)) == 1) || throw(ArgumentError("middle space should be singlet"))
 
-    (space(hnew, 3)' ≅ space(hold, 2) ⊗ space(mpoj, 2)) || return hnew
+    tensorprod = getfield(@__MODULE__, Symbol("\u2297"))
+    isisomorphic = getfield(@__MODULE__, Symbol("\u2245"))
+    isisomorphic(space(hnew, 3)', tensorprod(space(hold, 2), space(mpoj, 2))) || return hnew
 
-    # tmp = DMRG.loose_isometry(storagetype(hnew), space(hnew, 3)', space(hold, 2) ⊗ space(mpoj, 2) )
+    # tmp = DMRG.loose_isometry(storagetype(hnew), space(hnew, 3)', tensorprod(space(hold, 2), space(mpoj, 2)))
     # @tensor hnew[3,6,7;1,4] += conj(hold[1,2,3]) * conj(mpoj[4,5,6]) * conj(tmp[7,2,5])
 
     for (f1l, f1r) in fusiontrees(hold)
         v = StridedView(dropdims(hold[f1l, f1r], dims=2)')
-        (f1l′, f1r′), coef0 = only(permute(f1l, f1r, (1,), (2,3)))
-        c1 = f1l′.coupled
+        (f1lp, f1rp), coef0 = only(permute(f1l, f1r, (1,), (2,3)))
+        c1 = f1lp.coupled
         for (f2l, f2r) in fusiontrees(mpoj)
-            α = only(mpoj[f2l, f2r])
-            (f2l′, f2r′), coef1 = only(permute(f2l, f2r, (1,), (2,3)))
-            c2 = f2l′.coupled
-            c = first(c1 ⊗ c2)
-            for (fl, coef2) in TK.merge(f1l′, f2l′, c)
-            	for (fr, coef3) in TK.merge(f1r′, f2r′, c)
-            		uncoupled = (fr.uncoupled[2], fr.uncoupled[4], first(fr.uncoupled[1] ⊗ fr.uncoupled[3]) )
+            alpha = only(mpoj[f2l, f2r])
+            (f2lp, f2rp), coef1 = only(permute(f2l, f2r, (1,), (2,3)))
+            c2 = f2lp.coupled
+            c = first(tensorprod(c1, c2))
+            for (fl, coef2) in TK.merge(f1lp, f2lp, c)
+            	for (fr, coef3) in TK.merge(f1rp, f2rp, c)
+            		uncoupled = (fr.uncoupled[2], fr.uncoupled[4], first(tensorprod(fr.uncoupled[1], fr.uncoupled[3])))
             		isdual = (fr.isdual[2], fr.isdual[4], true)
-            		 fr′ = FusionTree(uncoupled, fr.coupled, isdual)
-            		 coef = α * coef0 * coef1 * coef2 * coef3
-            		 out = sreshape(hnew[fr′, fl], size(v))
+            		frp = FusionTree(uncoupled, fr.coupled, isdual)
+            		coef = alpha * coef0 * coef1 * coef2 * coef3
+            		out = sreshape(hnew[frp, fl], size(v))
             		 # out .+= coef .* v
             		 axpy!(coef, v, out)
             	end

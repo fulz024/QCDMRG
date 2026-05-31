@@ -30,6 +30,13 @@ TK.scalartype(::Type{RenormalizedATensor{S, M, F, I}}) where {S, M, F, I} = scal
 TK.space(t::RenormalizedATensor) = HomSpace(codomain(t), domain(t))
 TK.space(t::RenormalizedATensor, i::Int) = space(t)[i]
 
+function Base.similar(t::RenormalizedATensor, ::Type{T}) where {T}
+	data = similar(t.data, T)
+	return RenormalizedATensor(data, t.codom, t.dom, t.outer)
+end
+
+Base.similar(t::RenormalizedATensor) = similar(t, scalartype(t))
+
 
 rbtensortype(::Type{S}, ::Type{T}) where {S <: ElementarySpace, T} = tensormaptype(S, 2, 2, T)
 

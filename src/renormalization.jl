@@ -168,10 +168,10 @@ end
 function renormalizeright(hold::MPSTensor, mpoj::MPSTensor; dagger::Bool=false)
     if dagger
         out = fuse(space(mpoj, 2), space(hold, 2)')
-        hnew = RATensor(zeros, scalartype(hold), space(mpoj, 3) ⊗ space(hold, 3)' ⊗ out, space(mpoj, 1)' ⊗ space(hold, 1)' )
+        hnew = scratch_rtensor!(scalartype(hold), space(mpoj, 3) ⊗ space(hold, 3)' ⊗ out, space(mpoj, 1)' ⊗ space(hold, 1)')
     else
         out = fuse(space(mpoj, 2), space(hold, 2))
-        hnew = RATensor(zeros, scalartype(hold), space(mpoj, 3) ⊗ space(hold, 1) ⊗ out, space(mpoj, 1)' ⊗ space(hold, 3)' )  
+        hnew = scratch_rtensor!(scalartype(hold), space(mpoj, 3) ⊗ space(hold, 1) ⊗ out, space(mpoj, 1)' ⊗ space(hold, 3)')
     end
     return renormalizeright!(hnew, hold, mpoj, dagger=dagger)
 end
@@ -261,7 +261,7 @@ function renormalizeright!(hnew::RATensor, hold::MPSTensor, mpoj::MPSTensor; dag
     end
 end
 function renormalizeright(hold::MPSTensor, mpoj1::Nothing)
-    hnew = RATensor(zeros, scalartype(hold), _u1u1_pspace' ⊗ space(hold, 1) ⊗ space(hold, 2), _u1u1_pspace' ⊗ space(hold, 3)' )
+    hnew = scratch_rtensor!(scalartype(hold), _u1u1_pspace' ⊗ space(hold, 1) ⊗ space(hold, 2), _u1u1_pspace' ⊗ space(hold, 3)')
     return renormalizeright!(hnew, hold, mpoj1)
 end 
 function renormalizeright2!(hnew::RATensor, hold::MPSTensor, mpoj1::Nothing) 
@@ -300,7 +300,8 @@ function renormalizeright!(hnew::RATensor, hold::MPSTensor, mpoj1::Nothing)
     return hnew
 end
 function renormalizeright(hold::MPSBondTensor, mpoj::MPSTensor)
-    hnew = RATensor(zeros, promote_type(scalartype(hold), scalartype(mpoj)), space(mpoj, 3) ⊗ space(hold, 1) ⊗ space(mpoj, 2), space(mpoj, 1)' ⊗ space(hold, 2)' )
+    T = promote_type(scalartype(hold), scalartype(mpoj))
+    hnew = scratch_rtensor!(T, space(mpoj, 3) ⊗ space(hold, 1) ⊗ space(mpoj, 2), space(mpoj, 1)' ⊗ space(hold, 2)')
     return renormalizeright!(hnew, hold, mpoj)
 end
 function renormalizeright2!(hnew::RATensor, hold::MPSBondTensor, mpoj::MPSTensor) 
@@ -507,12 +508,13 @@ function renormalizeleft!(hnew::RBTensor, hold::MPSBondTensor, mpoj::MPSBondTens
     return hnew
 end
 function renormalizeleft(hold::MPSTensor, mpoj::MPSTensor; dagger::Bool=false)
+    T = promote_type(scalartype(hold), scalartype(mpoj))
     if dagger
         mspace = fuse(space(mpoj, 2)', space(hold, 2))       
-        hnew = RATensor(zeros, promote_type(scalartype(hold), scalartype(mpoj)), space(hold, 3)' ⊗ space(mpoj, 1) ⊗ mspace', space(hold, 1) ⊗ space(mpoj, 3)')               
+        hnew = scratch_rtensor!(T, space(hold, 3)' ⊗ space(mpoj, 1) ⊗ mspace', space(hold, 1) ⊗ space(mpoj, 3)')
     else
         mspace = fuse(space(mpoj, 2)', space(hold, 2)')       
-        hnew = RATensor(zeros, promote_type(scalartype(hold), scalartype(mpoj)), space(hold, 1) ⊗ space(mpoj, 1) ⊗ mspace', space(hold, 3)' ⊗ space(mpoj, 3)')        
+        hnew = scratch_rtensor!(T, space(hold, 1) ⊗ space(mpoj, 1) ⊗ mspace', space(hold, 3)' ⊗ space(mpoj, 3)')
     end
     return renormalizeleft!(hnew, hold, mpoj, dagger=dagger)
 end
@@ -593,7 +595,7 @@ function renormalizeleft!(hnew::RATensor, hold::MPSTensor, mpoj::MPSTensor; dagg
     return hnew 
 end
 function renormalizeleft(hold::MPSTensor, mpoj1::Nothing)
-    hnew = RATensor(zeros, scalartype(hold), space(hold, 1) ⊗ _u1u1_pspace ⊗ space(hold, 2), space(hold, 3)' ⊗ _u1u1_pspace)
+    hnew = scratch_rtensor!(scalartype(hold), space(hold, 1) ⊗ _u1u1_pspace ⊗ space(hold, 2), space(hold, 3)' ⊗ _u1u1_pspace)
     return renormalizeleft!(hnew, hold, mpoj1)
 end
 function renormalizeleft2!(hnew::RATensor, hold::MPSTensor, mpoj1::Nothing)
@@ -632,7 +634,8 @@ function renormalizeleft!(hnew::RATensor, hold::MPSTensor, mpoj1::Nothing)
     return hnew   
 end
 function renormalizeleft(hold::MPSBondTensor, mpoj::MPSTensor)
-    hnew = RATensor(zeros, promote_type(scalartype(hold), scalartype(mpoj)), space(hold, 1) ⊗ space(mpoj, 1) ⊗ space(mpoj, 2), space(hold, 2)' ⊗ space(mpoj, 3)')
+    T = promote_type(scalartype(hold), scalartype(mpoj))
+    hnew = scratch_rtensor!(T, space(hold, 1) ⊗ space(mpoj, 1) ⊗ space(mpoj, 2), space(hold, 2)' ⊗ space(mpoj, 3)')
     return renormalizeleft!(hnew, hold, mpoj)
 end
 function renormalizeleft2!(hnew::RATensor, hold::MPSBondTensor, mpoj::MPSTensor) 

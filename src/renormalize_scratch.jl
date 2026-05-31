@@ -6,9 +6,10 @@ mutable struct RenormalizeScratch{T<:Number}
 	workspace_cap::Int
 	mat_pool::Dict{Tuple{Any,Int,Int}, Any}
 	vec_pool::Dict{Tuple{Any,Int}, Any}
+	rtensor_template_pool::Dict{Tuple{Any,Any,Any}, Any}
 end
 
-RenormalizeScratch{T}() where {T<:Number} = RenormalizeScratch{T}(T[], 0, Dict(), Dict())
+RenormalizeScratch{T}() where {T<:Number} = RenormalizeScratch{T}(T[], 0, Dict(), Dict(), Dict())
 
 const _renorm_scratch = RenormalizeScratch{Float64}[RenormalizeScratch{Float64}() for _ in 1:Threads.maxthreadid()]
 
@@ -94,10 +95,46 @@ end
 
 scratch_vector!(::Type{A}, n::Int) where {A} = scratch_vector!(current_renorm_scratch(), A, n)
 
+"""Create a zero `RATensor` while reusing cached block-structure templates."""
+function scratch_rtensor!(
+	scratch::RenormalizeScratch, ::Type{T},
+	codom::ProductSpace{S,3}, dom::ProductSpace{S,2},
+) where {T<:Number,S<:ElementarySpace}
+	key = (T, codom, dom)
+	template = get!(scratch.rtensor_template_pool, key) do
+		RATensor(zeros, T, codom, dom)
+	end
+	t = similar(template, T)
+	fill!(t.data, zero(T))
+	return t
+end
+
+scratch_rtensor!(::Type{T}, codom::ProductSpace{S,3}, dom::ProductSpace{S,2}) where {T<:Number,S<:ElementarySpace} =
+	scratch_rtensor!(current_renorm_scratch(), T, codom, dom)
+
+"""Per-call cache for small physical-site operator TensorMaps."""
+mutable struct TensorMapCache
+	left::Dict{Any, Any}
+	right::Dict{Any, Any}
+end
+
+TensorMapCache() = TensorMapCache(Dict{Any, Any}(), Dict{Any, Any}())
+
+function cached_tensormap!(cache::TensorMapCache, key, op; side::Symbol)
+	d = side === :L ? cache.left : cache.right
+	if haskey(d, key)
+		return d[key]
+	end
+	t = totensormap(op; side=side)
+	d[key] = t
+	return t
+end
+
 function reset_renorm_scratch_pools!()
 	for s in _renorm_scratch
 		empty!(s.mat_pool)
 		empty!(s.vec_pool)
+		empty!(s.rtensor_template_pool)
 	end
 	return nothing
 end
@@ -106,6 +143,7 @@ end
 function _fill_one_PA_left!(
 	PAnew, PAold, adagTold, id_left,
 	idxr::Int, idxs::Int, orbr, orbs, sc, sl, h2e, ops::SiteOps,
+	tmcache::Union{Nothing, TensorMapCache}=nothing,
 )
 	if isassigned(PAold, idxr + 2, idxs + 2)
 		PAnew[idxr, idxs] = renormalizeleft(PAold[idxr + 2, idxs + 2], nothing)
@@ -123,10 +161,13 @@ function _fill_one_PA_left!(
 			coef = h2e[orbp, orbq, orbr, orbs]
 			if !iszero(coef)
 				op_q = site_adag(ops, idxq)
+				op_q_t = tmcache === nothing ?
+					totensormap(coef * op_q, side=:L) :
+					coef * cached_tensormap!(tmcache, (:adag, idxq), op_q; side=:L)
 				if isassigned(PAnew, idxr, idxs)
-					PAnew[idxr, idxs] = renormalizeleft!(PAnew[idxr, idxs], adagTold[idxp], totensormap(coef * op_q, side=:L))
+					PAnew[idxr, idxs] = renormalizeleft!(PAnew[idxr, idxs], adagTold[idxp], op_q_t)
 				else
-					PAnew[idxr, idxs] = renormalizeleft(adagTold[idxp], totensormap(coef * op_q, side=:L))
+					PAnew[idxr, idxs] = renormalizeleft(adagTold[idxp], op_q_t)
 				end
 			end
 		end
@@ -136,6 +177,17 @@ end
 
 function fill_PA_left!(PAnew, PAold, adagTold, id_left, sr, sc, sl, h2e)
 	ops = SiteOps(sc)
+	if Threads.nthreads() == 1
+		tmcache = TensorMapCache()
+		for (idxr, orbr) in enumerate(sr)
+			for (idxs, orbs) in enumerate(sr)
+				if orbr < orbs
+					_fill_one_PA_left!(PAnew, PAold, adagTold, id_left, idxr, idxs, orbr, orbs, sc, sl, h2e, ops, tmcache)
+				end
+			end
+		end
+		return PAnew
+	end
 	pairs = NTuple{4,Any}[]
 	for (idxr, orbr) in enumerate(sr)
 		for (idxs, orbs) in enumerate(sr)
@@ -144,7 +196,7 @@ function fill_PA_left!(PAnew, PAold, adagTold, id_left, sr, sc, sl, h2e)
 			end
 		end
 	end
-	if Threads.nthreads() > 1 && length(pairs) >= MIN_RENORM_TASKS_FOR_THREADS
+	if length(pairs) >= MIN_RENORM_TASKS_FOR_THREADS
 		Threads.@threads for (idxr, idxs, orbr, orbs) in pairs
 			_fill_one_PA_left!(PAnew, PAold, adagTold, id_left, idxr, idxs, orbr, orbs, sc, sl, h2e, ops)
 		end
