@@ -45,7 +45,7 @@ function renormalizeHright(storage_old::QCSiteStorages, ham::MolecularHamiltonia
 
 	# eat Ta
 	for (idxs, orbs) in enumerate(sr)
-		op_pqr = _empty
+		op_pqr = scratch_empty()
 		for (idxp, orbp) in enumerate(sc)
 			op_p = sqC(sc, idxp, true)
 			for (idxq, orbq) in enumerate(sc)
@@ -67,7 +67,7 @@ function renormalizeHright(storage_old::QCSiteStorages, ham::MolecularHamiltonia
 	for (idxr, orbr) in enumerate(sr)
 		for (idxs, orbs) in enumerate(sr)
 			if orbr < orbs
-				op_pq = _empty
+				op_pq = scratch_empty()
 				for (idxp, orbp) in enumerate(sc)
 					op_p = sqC(sc, idxp, true)
 					for (idxq, orbq) in enumerate(sc)
@@ -138,7 +138,7 @@ function renormalizestorageright(ham::MolecularHamiltonian, spacer::ElementarySp
 	for (idxp, orbp) in enumerate(sl)
 		for (idxr, orbr) in enumerate(sl)
 			if orbp <= orbr
-				op_qs = _empty
+				op_qs = scratch_empty()
 				for (idxq, orbq) in enumerate(sc)
 					op_q = sqC(sc, idxq, true)
 					for (idxs, orbs) in enumerate(sc)
@@ -154,7 +154,7 @@ function renormalizestorageright(ham::MolecularHamiltonian, spacer::ElementarySp
 	end
 	aTnew = Vector{A}(undef, nl)
 	for (idxp, orbp) in enumerate(sl)
-		op_qrs = _empty
+		op_qrs = scratch_empty()
 		for (idxq, orbq) in enumerate(sc)
 			op_q = sqC(sc, idxq, true)
 			op_qrs += h1e[orbp, orbq] * sqC(sc, idxq, false)
@@ -233,7 +233,7 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 				if isassigned(BQold, orbp, orbr)
 					BQnew[orbp, orbr] = renormalizeright(BQold[orbp, orbr], nothing)
 				end
-				op_qs = _empty
+				op_qs = scratch_empty()
 				for (idxq, orbq) in enumerate(sc)
 					op_q = sqC(sc, idxq, true)
 					for (idxs, orbs) in enumerate(sc)
@@ -291,7 +291,7 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 			aTnew[idxp] = renormalizeright(adagTold[idxp], nothing)
 		end
 
-		op_qrs = _empty
+		op_qrs = scratch_empty()
 		for (idxq, orbq) in enumerate(sc)
 			op_q = sqC(sc, idxq, true)
 			op_qrs += h1e[orbp, orbq] * sqC(sc, idxq, false)
@@ -332,7 +332,7 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 			end
 		end
 		for (idxq, orbq) in enumerate(sr)
-			op_rs = _empty
+			op_rs = scratch_empty()
 			for (idxr, orbr) in enumerate(sc)
 				op_r = sqC(sc, idxr, false)
 				for (idxs, orbs) in enumerate(sc)
@@ -354,7 +354,7 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 		end
 		for (idxs, orbs) in enumerate(sr)
 			for (idxq, orbq) in enumerate(sc)
-				op_qr = _empty
+				op_qr = scratch_empty()
 				op_q = sqC(sc, idxq, true)
 				for (idxr, orbr) in enumerate(sc)
 					op_r = sqC(sc, idxr, false)
@@ -405,7 +405,7 @@ function renormalizestorageright(storage_old::QCSiteStorages, ham::MolecularHami
 end
 
 function updatestoragerenormalizeright(storages::QCSiteStorages, mpsj)
-	workspace = Vector{scalartype(mpsj)}(undef, compute_workspace(mpsj))
+	workspace = scratch_workspace!(mpsj)
 	hnewr, BQnewr, PAnewr, aTnewr, Tanewr = storages.H, storages.BQ, storages.PA, storages.adagT, storages.Tdaga
 	BQnew = _updateright_all(BQnewr, mpsj, workspace)
 	PAnew = _updateright_all(PAnewr, mpsj, workspace)
@@ -420,8 +420,17 @@ updatestorageright(env::QCDMRGCache, site::Int, mpsj::MPSSiteTensor=env.mps[site
 function _updateright_all(storages::Vector, mpsj, workspace::Vector)
 	A = mpstensortype(spacetype(mpsj), storagetype(mpsj))
 	r = Vector{A}(undef, size(storages))
-	for i in 1:length(r)
-		if isassigned(storages, i)
+	indices = Int[]
+	for i in eachindex(storages)
+		isassigned(storages, i) && push!(indices, i)
+	end
+	if Threads.nthreads() > 1 && length(indices) >= MIN_RENORM_TASKS_FOR_THREADS
+		Threads.@threads for i in indices
+			ws = scratch_workspace!(mpsj)
+			r[i] = updaterenormalizeright(storages[i], mpsj, mpsj, ws)
+		end
+	else
+		for i in indices
 			r[i] = updaterenormalizeright(storages[i], mpsj, mpsj, workspace)
 		end
 	end
@@ -430,11 +439,19 @@ end
 function _updateright_all(storages::Matrix, mpsj, workspace::Vector)
 	A = mpstensortype(spacetype(mpsj), storagetype(mpsj))
 	r = Matrix{A}(undef, size(storages))
-	for i in 1:size(storages, 1)
-		for j in i:size(storages, 2)
-			if isassigned(storages, i, j)
-				r[i, j] = updaterenormalizeright(storages[i, j], mpsj, mpsj, workspace)
-			end
+	n = size(storages, 1)
+	tasks = NTuple{2,Int}[]
+	for i in 1:n, j in i:n
+		isassigned(storages, i, j) && push!(tasks, (i, j))
+	end
+	if Threads.nthreads() > 1 && length(tasks) >= MIN_RENORM_TASKS_FOR_THREADS
+		Threads.@threads for (i, j) in tasks
+			ws = scratch_workspace!(mpsj)
+			r[i, j] = updaterenormalizeright(storages[i, j], mpsj, mpsj, ws)
+		end
+	else
+		for (i, j) in tasks
+			r[i, j] = updaterenormalizeright(storages[i, j], mpsj, mpsj, workspace)
 		end
 	end
 	return r
@@ -481,7 +498,7 @@ function renormalizeHleft(storage_old::QCSiteStorages, ham::MolecularHamiltonian
 	hnew = renormalizeleft!(hnew, Hold, isomorphism(_u1u1_pspace, _u1u1_pspace))
 	# eat aT
 	for (idxp, orbp) in enumerate(sl)
-		op_qrs = _empty
+		op_qrs = scratch_empty()
 		for (idxq, orbq) in enumerate(sc)
 			op_q = sqC(sc, idxq, true)
 			op_qrs += h1e[orbp, orbq] * sqC(sc, idxq, false)
@@ -520,7 +537,7 @@ function renormalizeHleft(storage_old::QCSiteStorages, ham::MolecularHamiltonian
 	# eat B
 	for (idxp, orbp) in enumerate(sl)
 		for (idxr, orbr) in enumerate(sl)
-			op_qs = _empty
+			op_qs = scratch_empty()
 			for (idxq, orbq) in enumerate(sc)
 				op_q = sqC(sc, idxq, true)
 				for (idxs, orbs) in enumerate(sc)
@@ -563,23 +580,15 @@ function renormalizestorageleft(ham::MolecularHamiltonian, spacel::ElementarySpa
 	hnew = renormalizeHleft(ham, spacel)
 	A = ratensortype(spacetype(hnew), storagetype(hnew))
 	id_left = isomorphism(storagetype(hnew), spacel, spacel)
+	ops = SiteOps(sc)
 
 	PAnew = Matrix{A}(undef, nr, nr)
 	for (idxr, orbr) in enumerate(sr)
 		for (idxs, orbs) in enumerate(sr)
 			if orbr < orbs
-				op_pq = _empty
-				for (idxp, orbp) in enumerate(sc)
-					op_p = sqC(sc, idxp, true)
-					for (idxq, orbq) in enumerate(sc)
-						op_q = sqC(sc, idxq, true)
-						if orbp < orbq
-							op_pq += h2e[orbp, orbq, orbr, orbs] * op_p * op_q
-						end
-					end
-				end
+				op_pq = h2e_pair_op_pq(sc, h2e, orbr, orbs, ops)
 				if !iszero(op_pq)
-					PAnew[idxr, idxs] = renormalizeleft(id_left, totensormap( op_pq, side=:L))
+					PAnew[idxr, idxs] = renormalizeleft(id_left, totensormap(op_pq, side=:L))
 				end
 			end
 		end
@@ -605,7 +614,7 @@ function renormalizestorageleft(ham::MolecularHamiltonian, spacel::ElementarySpa
 
 	Tanew = Vector{A}(undef, nr)
 	for (idxs, orbs) in enumerate(sr)
-		op_pqr = _empty
+		op_pqr = scratch_empty()
 		for (idxp, orbp) in enumerate(sc)
 			op_p = sqC(sc, idxp, true)
 			for (idxq, orbq) in enumerate(sc)
@@ -647,46 +656,7 @@ function renormalizestorageleft(storage_old::QCSiteStorages, ham::MolecularHamil
 
 	# update PA storage
 	PAnew = Matrix{A}(undef, nr, nr)
-	for (idxr, orbr) in enumerate(sr)
-		for (idxs, orbs) in enumerate(sr)
-			if orbr < orbs
-				if isassigned(PAold, idxr+2, idxs+2)
-					PAnew[idxr, idxs] = renormalizeleft(PAold[idxr+2, idxs+2], nothing)
-				end
-				op_pq = _empty
-				for (idxp, orbp) in enumerate(sc)
-					op_p = sqC(sc, idxp, true)
-					for (idxq, orbq) in enumerate(sc)
-						op_q = sqC(sc, idxq, true)
-						if orbp < orbq
-							op_pq += h2e[orbp, orbq, orbr, orbs] * op_p * op_q
-						end
-					end
-				end
-				if !iszero(op_pq)
-					if isassigned(PAnew, idxr, idxs)
-						PAnew[idxr, idxs] = renormalizeleft!(PAnew[idxr, idxs], id_left, totensormap(op_pq, side=:L))
-					else
-						PAnew[idxr, idxs] = renormalizeleft(id_left, totensormap(op_pq, side=:L))
-					end
-				end
-
-				for (idxp, orbp) in enumerate(sl)
-					for (idxq, orbq) in enumerate(sc)
-						op_q = sqC(sc, idxq, true)
-						coef = h2e[orbp, orbq, orbr, orbs]
-						if !iszero(coef)
-							if isassigned(PAnew, idxr, idxs)
-								PAnew[idxr, idxs] = renormalizeleft!(PAnew[idxr, idxs], adagTold[idxp], totensormap(coef * op_q, side=:L))
-							else
-								PAnew[idxr, idxs] = renormalizeleft(adagTold[idxp], totensormap(coef * op_q, side=:L))
-							end
-						end
-					end
-				end
-			end
-		end
-	end
+	fill_PA_left!(PAnew, PAold, adagTold, id_left, sr, sc, sl, h2e)
 
 	# update BQ storage
 	# only upper triangular of B is stored
@@ -732,7 +702,7 @@ function renormalizestorageleft(storage_old::QCSiteStorages, ham::MolecularHamil
 		end
 	end
 	for (idxs, orbs) in enumerate(sr)
-		op_pqr = _empty
+		op_pqr = scratch_empty()
 		for (idxp, orbp) in enumerate(sc)
 			op_p = sqC(sc, idxp, true)
 			for (idxq, orbq) in enumerate(sc)
@@ -768,7 +738,7 @@ function renormalizestorageleft(storage_old::QCSiteStorages, ham::MolecularHamil
 		end
 
 		for (idxr, orbr) in enumerate(sl)
-			op_qp = _empty
+			op_qp = scratch_empty()
 			for (idxp, orbp) in enumerate(sc)
 				op_p = sqC(sc, idxp, false)
 				for (idxq, orbq) in enumerate(sc)
@@ -792,7 +762,7 @@ function renormalizestorageleft(storage_old::QCSiteStorages, ham::MolecularHamil
 			end
 		end
 		for (idxp, orbp) in enumerate(sl)
-			op_qr = _empty
+			op_qr = scratch_empty()
 			for (idxq, orbq) in enumerate(sc)
 				op_q = sqC(sc, idxq, true)
 				for (idxr, orbr) in enumerate(sc)
@@ -848,7 +818,7 @@ function renormalizestorageleft(storage_old::QCSiteStorages, ham::MolecularHamil
 end
 
 function updatestoragerenormalizeleft(storages::QCSiteStorages, mpsj)
-	workspace = Vector{scalartype(mpsj)}(undef, compute_workspace(mpsj))
+	workspace = scratch_workspace!(mpsj)
 	hnewr, BQnewr, PAnewr, aTnewr, Tanewr = storages.H, storages.BQ, storages.PA, storages.adagT, storages.Tdaga
 
 	BQnew = _updateleft_all(BQnewr, mpsj, workspace)
@@ -863,8 +833,17 @@ updatestorageleft(env::QCDMRGCache, site::Int, mpsj::MPSTensor=env.mps[site]) = 
 function _updateleft_all(storages::Vector, mpsj, workspace::Vector)
 	A = mpstensortype(spacetype(mpsj), storagetype(mpsj))
 	r = Vector{A}(undef, size(storages))
-	for i in 1:length(r)
-		if isassigned(storages, i)
+	indices = Int[]
+	for i in eachindex(storages)
+		isassigned(storages, i) && push!(indices, i)
+	end
+	if Threads.nthreads() > 1 && length(indices) >= MIN_RENORM_TASKS_FOR_THREADS
+		Threads.@threads for i in indices
+			ws = scratch_workspace!(mpsj)
+			r[i] = updaterenormalizeleft(storages[i], mpsj, mpsj, ws)
+		end
+	else
+		for i in indices
 			r[i] = updaterenormalizeleft(storages[i], mpsj, mpsj, workspace)
 		end
 	end
@@ -873,11 +852,19 @@ end
 function _updateleft_all(storages::Matrix, mpsj, workspace::Vector)
 	A = mpstensortype(spacetype(mpsj), storagetype(mpsj))
 	r = Matrix{A}(undef, size(storages))
-	for i in 1:size(storages, 1)
-		for j in i:size(storages, 2)
-			if isassigned(storages, i, j)
-				r[i, j] = updaterenormalizeleft(storages[i, j], mpsj, mpsj, workspace)
-			end
+	n = size(storages, 1)
+	tasks = NTuple{2,Int}[]
+	for i in 1:n, j in i:n
+		isassigned(storages, i, j) && push!(tasks, (i, j))
+	end
+	if Threads.nthreads() > 1 && length(tasks) >= MIN_RENORM_TASKS_FOR_THREADS
+		Threads.@threads for (i, j) in tasks
+			ws = scratch_workspace!(mpsj)
+			r[i, j] = updaterenormalizeleft(storages[i, j], mpsj, mpsj, ws)
+		end
+	else
+		for (i, j) in tasks
+			r[i, j] = updaterenormalizeleft(storages[i, j], mpsj, mpsj, workspace)
 		end
 	end
 	return r

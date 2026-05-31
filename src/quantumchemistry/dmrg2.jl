@@ -6,15 +6,23 @@ struct QCDMRG2 <: DMRGAlgorithm
 	noise::Float64
 	verbosity::Int
 	trunc::TruncationDimCutoff
+	eigsolver::Symbol
+	davidson_max_subspace::Int
+	olsen_precond::Bool
 end
 
-QCDMRG2(trunc::TruncationDimCutoff; maxiter::Int=100, tol::Real=1.0e-14, maxitereig::Int=10, toleig::Real=1.0e-10, noise::Real=0, verbosity::Int=1) = QCDMRG2(
-	maxiter, convert(Float64, tol), maxitereig, convert(Float64, toleig), convert(Float64, noise), verbosity, trunc)
+# `toleig`: bond eigsolve convergence on ||Hψ - Eψ|| (KrylovKit `Lanczos.tol` / Davidson `conv_thrd`).
+QCDMRG2(trunc::TruncationDimCutoff; maxiter::Int=100, tol::Real=1.0e-14, maxitereig::Int=10, toleig::Real=1.0e-5, noise::Real=0, verbosity::Int=1,
+	eigsolver::Symbol=:davidson, davidson_max_subspace::Int=50, olsen_precond::Bool=false) = QCDMRG2(
+	maxiter, convert(Float64, tol), maxitereig, convert(Float64, toleig), convert(Float64, noise), verbosity, trunc,
+	eigsolver, davidson_max_subspace, olsen_precond)
 QCDMRG2(; trunc::TruncationDimCutoff=DMRG.DefaultTruncation, kwargs...) = QCDMRG2(trunc; kwargs...)
 
 Base.similar(x::QCDMRG2; trunc::TruncationDimCutoff=x.trunc, maxiter::Int=x.maxiter, tol::Float64=x.tol, maxitereig::Int=x.maxitereig,
-	toleig::Float64=x.toleig, verbosity::Int=x.verbosity) = QCDMRG2(trunc=trunc, maxiter=maxiter, tol=tol, maxitereig=maxitereig,
-	toleig=toleig, verbosity=verbosity)
+	toleig::Float64=x.toleig, verbosity::Int=x.verbosity, eigsolver::Symbol=x.eigsolver,
+	davidson_max_subspace::Int=x.davidson_max_subspace, olsen_precond::Bool=x.olsen_precond) = QCDMRG2(
+	trunc=trunc, maxiter=maxiter, tol=tol, maxitereig=maxitereig, toleig=toleig, verbosity=verbosity,
+	eigsolver=eigsolver, davidson_max_subspace=davidson_max_subspace, olsen_precond=olsen_precond)
 
 function Base.getproperty(x::QCDMRG2, s::Symbol)
 	if s == :D
@@ -29,10 +37,13 @@ end
 function _timed!(f, t::DMRGTiming, field::Symbol)
 	Δ = @elapsed ret = f()
 	setproperty!(t, field, getproperty(t, field) + Δ)
+	if field === :tmve_heavy || field === :tmve_light
+		t.tmve += Δ
+	end
 	return ret
 end
 
-"""Shift QC environments to the current bond (block2 `move_to` / env update)."""
+"""Shift QC environments to the current bond."""
 function _renormalize_bond_storages!(env::QCDMRGCache, bond::Int)
 	mpsA, mpsB = env.mps[bond], env.mps[bond + 1]
 	Sleft = renormalizestorageleft(env, bond, space_l(mpsA))
@@ -40,7 +51,7 @@ function _renormalize_bond_storages!(env::QCDMRGCache, bond::Int)
 	return Sleft, Sright, mpsA, mpsB
 end
 
-"""Assemble `QCCenter` for Lanczos (block2 `Teff`: effective H only)."""
+"""Assemble `QCCenter` for Lanczos."""
 function _assemble_heff!(Sleft, Sright, mpsA, mpsB)
 	Opleft = renormalizedstorage(Sleft)
 	Opright = renormalizedstorage(Sright)
@@ -53,7 +64,7 @@ function _prepare_bond_heff!(env::QCDMRGCache, bond::Int, t)
 	Sleft, Sright, mpsA, mpsB = if t === nothing
 		_renormalize_bond_storages!(env, bond)
 	else
-		_timed!(() -> _renormalize_bond_storages!(env, bond), t, :tmve)
+		_timed!(() -> _renormalize_bond_storages!(env, bond), t, :tmve_heavy)
 	end
 	heff, x, Opleft, Opright = if t === nothing
 		_assemble_heff!(Sleft, Sright, mpsA, mpsB)
@@ -63,15 +74,97 @@ function _prepare_bond_heff!(env::QCDMRGCache, bond::Int, t)
 	return heff, x, Opleft, Opright, mpsA, mpsB
 end
 
+"""Initial guess on flat bond space (matches `QCCenter` `Hleft`/`Hright` layout)."""
+function _eig_init(x)
+	ψ0 = renormalizedoperator(x)
+	normalize!(ψ0)
+	return ψ0
+end
+
+function _lanczos_solver(heff, x, alg::QCDMRG2, bond::Int, t)
+	ψ0 = _eig_init(x)
+	lanczos = Lanczos(; maxiter=100, tol=alg.toleig, eager=true)
+	n_mv0 = t === nothing ? 0 : t.n_matvec
+	solve = () -> eigsolve(heff, ψ0, 1, :SR, lanczos)
+	eigenvalues, eigenvecs, info = if t === nothing
+		solve()
+	else
+		_timed!(solve, t, :teig)
+	end
+	n_mv = t === nothing ? info.numops : t.n_matvec - n_mv0
+	normres = isempty(info.normres) ? NaN : info.normres[1]
+	rec = BondEigRecord(bond, eigenvalues[1], normres, n_mv, info.numiter, info.numops)
+	if t !== nothing
+		push!(t.bond_records, rec)
+	end
+	if alg.verbosity >= 2
+		b1, b2 = bond - 1, bond
+		@printf("  --> bond = %2d-%2d .. n_mv = %4d E = % .10f Error = %.2e (DavTol=%.0e)\n",
+			b1, b2, n_mv, rec.energy, bond_eig_error(rec), alg.toleig)
+	end
+	return eigenvalues, eigenvecs, info
+end
+
+function _davidson_solver(heff::QCCenter, x, alg::QCDMRG2, bond::Int, t)
+	ψ0 = _eig_init(x)
+	solver = DavidsonSolver(;
+		conv_thrd=alg.toleig,
+		deflation_max_size=alg.davidson_max_subspace,
+	)
+	precond_aa = if alg.olsen_precond
+		qc_diagonal_aa(heff, ψ0)
+	else
+		nothing
+	end
+	n_mv0 = t === nothing ? 0 : t.n_matvec
+	solve = (precond_aa) -> davidson_eigsolve(heff, ψ0, solver; precond_aa=precond_aa)
+	eigval, ψ_out, n_mv_dav, normres = try
+		if t === nothing
+			solve(precond_aa)
+		else
+			_timed!(() -> solve(precond_aa), t, :teig)
+		end
+	catch err
+		if precond_aa === nothing
+			rethrow(err)
+		end
+		alg.verbosity >= 1 && @warn "Davidson Olsen failed; retrying without preconditioner" exception=err
+		if t === nothing
+			solve(nothing)
+		else
+			_timed!(() -> solve(nothing), t, :teig)
+		end
+	end
+	n_mv = t === nothing ? n_mv_dav : (t.n_matvec - n_mv0)
+	rec = BondEigRecord(bond, eigval, normres, n_mv, 0, n_mv)
+	if t !== nothing
+		push!(t.bond_records, rec)
+	end
+	if alg.verbosity >= 2
+		b1, b2 = bond - 1, bond
+		@printf("  --> bond = %2d-%2d .. n_mv = %4d E = % .10f Error = %.2e (DavTol=%.0e)\n",
+			b1, b2, n_mv, rec.energy, bond_eig_error(rec), alg.toleig)
+	end
+	eigenvalues = [eigval]
+	eigenvecs = [ψ_out]
+	return eigenvalues, eigenvecs, (normres=normres, numops=n_mv)
+end
+
+function _bond_eigsolve(heff, x, alg::QCDMRG2, bond::Int, t)
+	if alg.eigsolver === :davidson
+		return _davidson_solver(heff, x, alg, bond, t)
+	elseif alg.eigsolver === :lanczos
+		return _lanczos_solver(heff, x, alg, bond, t)
+	else
+		error("unknown eigsolver $(alg.eigsolver); use :davidson or :lanczos")
+	end
+end
+
 function _optimize_bond_left!(env::QCDMRGCache, bond::Int, alg::QCDMRG2)
 	t = active_dmrg_timing()
 	heff, x, Opleft, _, _, _ = _prepare_bond_heff!(env, bond, t)
 
-	eigenvalues_0, eigenvecs_0 = if t === nothing
-		eigsolve(heff, renormalizedoperator(x), 1, :SR, Lanczos(; maxiter=100, tol=alg.toleig, eager=true))
-	else
-		_timed!(() -> eigsolve(heff, renormalizedoperator(x), 1, :SR, Lanczos(; maxiter=100, tol=alg.toleig, eager=true)), t, :teig)
-	end
+	eigenvalues_0, eigenvecs_0, _ = _bond_eigsolve(heff, x, alg, bond, t)
 	eigenvalue_0, eigenvec_0 = eigenvalues_0[1], eigenvecs_0[1]
 	eigenvec = TensorMap(blocks(eigenvec_0), codomain(x), domain(x))
 
@@ -126,7 +219,7 @@ function _optimize_bond_left!(env::QCDMRGCache, bond::Int, alg::QCDMRG2)
 			env.mps[bond + 1] = permute(v2, (1, 2), (3,))
 			Snew = updatestoragerenormalizeleft(Opleft, renormalizedoperator(env.mps[bond]))
 			setstorage!(env, bond, Snew)
-		end, t, :tmve)
+		end, t, :tmve_light)
 		t.nbonds += 1
 	end
 
@@ -138,11 +231,7 @@ function _optimize_bond_right!(env::QCDMRGCache, bond::Int, alg::QCDMRG2)
 	t = active_dmrg_timing()
 	heff, x, _, Opright, _, mpsB = _prepare_bond_heff!(env, bond, t)
 
-	eigenvalues_0, eigenvecs_0 = if t === nothing
-		eigsolve(heff, renormalizedoperator(x), 1, :SR, Lanczos(; maxiter=100, tol=alg.toleig, eager=true))
-	else
-		_timed!(() -> eigsolve(heff, renormalizedoperator(x), 1, :SR, Lanczos(; maxiter=100, tol=alg.toleig, eager=true)), t, :teig)
-	end
+	eigenvalues_0, eigenvecs_0, _ = _bond_eigsolve(heff, x, alg, bond, t)
 	eigenvalue_0, eigenvec_0 = eigenvalues_0[1], eigenvecs_0[1]
 	eigenvec = TensorMap(blocks(eigenvec_0), codomain(x), domain(x))
 
@@ -199,7 +288,7 @@ function _optimize_bond_right!(env::QCDMRGCache, bond::Int, alg::QCDMRG2)
 			env.mps.s[bond + 1] = s
 			Snew = updatestoragerenormalizeright(Opright, renormalizedoperator(mpsB))
 			setstorage!(env, bond + 1, Snew)
-		end, t, :tmve)
+		end, t, :tmve_light)
 		t.nbonds += 1
 	end
 	(alg.verbosity > 2) && println("E₀=$(eigenvalue_0), E=$eigenvalue, δ=$(round(delta, digits=12)), χ=$(dim(space(s, 2))) after optimizing bond $bond")
@@ -208,6 +297,8 @@ end
 
 # `f do ... end` passes the closure as the first argument.
 function _run_half_sweep_timing!(f, alg::QCDMRG2, direction::String)
+	configure_threading!(blas_threads=Threads.nthreads() > 1 ? 1 : BLAS.get_num_threads())
+	reset_renorm_scratch_pools!()
 	reset_dmrg_timing!()
 	energies, delta = f()
 	t = finish_dmrg_timing!()

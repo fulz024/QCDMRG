@@ -169,6 +169,10 @@ function _use_parallel_terms(m::QCCenter)
 end
 
 function TK.mul!(y, m::QCCenter, x)
+	t = active_dmrg_timing()
+	if t !== nothing
+		t.n_matvec += 1
+	end
 	mul!(y, m.Hleft, x, true, false)
 	mul!(y, x, m.Hright, true, true)
 	if !_use_parallel_terms(m)

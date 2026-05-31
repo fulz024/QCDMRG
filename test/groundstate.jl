@@ -5,7 +5,8 @@ println("------------------------------------")
 using JSON
 
 function do_dmrg(env)
-	alg = QCDMRG2(noise=1.0e-10)
+	# Tighter bond eigsolve than production default (1e-5) for ED comparison at 1e-8.
+	alg = QCDMRG2(noise=1.0e-10, toleig=1.0e-8)
 	_energies1 = Float64[]
 	for n in 1:5
 		append!(_energies1, sweep!(env, alg)[1])
@@ -73,7 +74,7 @@ function read_data(pathname)
 	return E0, reshape(t, (L, L)), reshape(v, (L, L, L, L))
 end
 
-read_lih_data() = read_data("lih.json")
+read_lih_data() = read_data(joinpath(@__DIR__, "lih.json"))
 
 const LiH_FCI_ENERGY = -7.78446028003123
 
