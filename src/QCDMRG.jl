@@ -4,7 +4,7 @@ module QCDMRG
 export MolecularHamiltonian, randomqcmps, prodqcmps, u1u1_pspace
 export DMRGTiming, DMRGSweepTiming, BondEigRecord, reset_dmrg_timing!, finish_dmrg_timing!
 export print_dmrg_timing, print_dmrg_sweep_timing, print_bond_eig_record, print_bond_eig_records, print_bond_eig_sweep
-export bond_eig_resnorm, active_dmrg_timing, total_sweep_time
+export bond_eig_resnorm, active_dmrg_timing, total_sweep_time, bond_block_time
 
 
 using Reexport

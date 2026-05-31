@@ -5,7 +5,8 @@ Per half-sweep timings.
 
 - `Teff`: assemble `QCCenter` (`renormalizedstorage` + `terms`) and `qc_diagonal_aa!` when preconditioning is on
 - `Teig`: Davidson (default, Olsen) / Lanczos — `H|ψ⟩` matvecs at bond eigsolve (`nmv`)
-- `Tmve`: environment shift (`renormalizestorage*`) + post-SVD `updatestoragerenormalize*` / `setstorage!`
+- `Tblk` (`bond_block_time`): block2-aligned **two-site bond update** = `Teff + Teig + Tsvd + Tsplt` (excludes environment prep; see `Tmve`)
+- `Tmve`: `renormalizestorage*` (heavy) + post-SVD `updatestoragerenormalize*` / `setstorage!` (light) — **not** block2 `Tmve` (`move_to` only)
 - `Tsvd`: two-site SVD truncation
 - `Tsplt`: split / merge MPS after SVD (normalize, bond tensors, energy check)
 
@@ -51,6 +52,9 @@ function total_sweep_time(t::DMRGTiming)
 	return t.teff + t.teig + t.tmve + t.tsvd + t.tsplt
 end
 
+"""Per-bond two-site optimization (block2 `Tblk`: `update_two_dot` after `move_to`)."""
+bond_block_time(t::DMRGTiming) = t.teff + t.teig + t.tsvd + t.tsplt
+
 struct DMRGSweepTiming
 	forward::DMRGTiming
 	backward::DMRGTiming
@@ -76,8 +80,9 @@ end
 function print_dmrg_timing(t::DMRGTiming; io::IO=stdout, prefix::String="", direction::String="")
 	dir = isempty(direction) ? "" : " | Direction = $direction"
 	@printf(io, "%sTime sweep = %8.3f%s\n", prefix, total_sweep_time(t), dir)
-	@printf(io, "%s | Teff = %.3f | Teig = %.3f | Tmve = %.3f | Tsvd = %.3f | Tsplt = %.3f",
-		prefix, t.teff, t.teig, t.tmve, t.tsvd, t.tsplt)
+	tblk = bond_block_time(t)
+	@printf(io, "%s | Teff = %.3f | Teig = %.3f | Tblk = %.3f | Tmve = %.3f | Tsvd = %.3f | Tsplt = %.3f",
+		prefix, t.teff, t.teig, tblk, t.tmve, t.tsvd, t.tsplt)
 	if t.tmve_heavy > 0 || t.tmve_light > 0
 		@printf(io, " | Tmve_h = %.3f | Tmve_l = %.3f", t.tmve_heavy, t.tmve_light)
 	end

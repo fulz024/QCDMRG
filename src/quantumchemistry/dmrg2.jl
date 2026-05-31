@@ -301,7 +301,7 @@ end
 
 # `f do ... end` passes the closure as the first argument.
 function _run_half_sweep_timing!(f, alg::QCDMRG2, direction::String)
-	configure_threading!(blas_threads=Threads.nthreads() > 1 ? 1 : BLAS.get_num_threads())
+	configure_threading!(blas_threads=active_blas_threads_for_julia())
 	reset_renorm_scratch_pools!()
 	reset_dmrg_timing!()
 	energies, delta = f()

@@ -1,19 +1,36 @@
 """
 Thread-local scratch buffers for `renormalizestorage*` / `updatestoragerenormalize*`
 """
+
+"""Per-call cache for small physical-site operator TensorMaps."""
+mutable struct TensorMapCache
+	left::Dict{Any, Any}
+	right::Dict{Any, Any}
+	scope::Any
+end
+
+TensorMapCache() = TensorMapCache(Dict{Any, Any}(), Dict{Any, Any}(), nothing)
+
 mutable struct RenormalizeScratch{T<:Number}
 	workspace::Vector{T}
 	workspace_cap::Int
 	mat_pool::Dict{Tuple{Any,Int,Int}, Any}
 	vec_pool::Dict{Tuple{Any,Int}, Any}
 	rtensor_template_pool::Dict{Tuple{Any,Any,Any}, Any}
+	tmcache::Any
 end
 
-RenormalizeScratch{T}() where {T<:Number} = RenormalizeScratch{T}(T[], 0, Dict(), Dict(), Dict())
+RenormalizeScratch{T}() where {T<:Number} = RenormalizeScratch{T}(T[], 0, Dict(), Dict(), Dict(), TensorMapCache())
 
 const _renorm_scratch = RenormalizeScratch{Float64}[RenormalizeScratch{Float64}() for _ in 1:Threads.maxthreadid()]
 
-@inline current_renorm_scratch() = _renorm_scratch[Threads.threadid()]
+@inline function current_renorm_scratch()
+	tid = Threads.threadid()
+	while length(_renorm_scratch) < tid
+		push!(_renorm_scratch, RenormalizeScratch{Float64}())
+	end
+	return _renorm_scratch[tid]
+end
 
 """Grow-or-reuse numeric workspace for `mul_twosides!` / renormalize updates."""
 function scratch_workspace!(scratch::RenormalizeScratch{T}, ::Type{T}, mpsj::AbstractTensorMap) where {T<:Number}
@@ -112,29 +129,36 @@ end
 scratch_rtensor!(::Type{T}, codom::ProductSpace{S,3}, dom::ProductSpace{S,2}) where {T<:Number,S<:ElementarySpace} =
 	scratch_rtensor!(current_renorm_scratch(), T, codom, dom)
 
-"""Per-call cache for small physical-site operator TensorMaps."""
-mutable struct TensorMapCache
-	left::Dict{Any, Any}
-	right::Dict{Any, Any}
+function scratch_tensormap_cache!(scratch::RenormalizeScratch, scope)
+	cache = scratch.tmcache::TensorMapCache
+	if cache.scope != scope
+		empty!(cache.left)
+		empty!(cache.right)
+		cache.scope = scope
+	end
+	return cache
 end
 
-TensorMapCache() = TensorMapCache(Dict{Any, Any}(), Dict{Any, Any}())
+scratch_tensormap_cache!(scope) = scratch_tensormap_cache!(current_renorm_scratch(), scope)
 
 function cached_tensormap!(cache::TensorMapCache, key, op; side::Symbol)
 	d = side === :L ? cache.left : cache.right
-	if haskey(d, key)
-		return d[key]
+	return get!(d, key) do
+		totensormap(op; side=side)
 	end
-	t = totensormap(op; side=side)
-	d[key] = t
-	return t
 end
+
+"""Fresh operator cache for one storage cell (`@threads` must not share thread-local cache)."""
+@inline storage_cell_tmcache() = TensorMapCache()
 
 function reset_renorm_scratch_pools!()
 	for s in _renorm_scratch
 		empty!(s.mat_pool)
 		empty!(s.vec_pool)
 		empty!(s.rtensor_template_pool)
+		empty!(s.tmcache.left)
+		empty!(s.tmcache.right)
+		s.tmcache.scope = nothing
 	end
 	return nothing
 end
@@ -198,11 +222,13 @@ function fill_PA_left!(PAnew, PAold, adagTold, id_left, sr, sc, sl, h2e)
 	end
 	if length(pairs) >= MIN_RENORM_TASKS_FOR_THREADS
 		Threads.@threads for (idxr, idxs, orbr, orbs) in pairs
-			_fill_one_PA_left!(PAnew, PAold, adagTold, id_left, idxr, idxs, orbr, orbs, sc, sl, h2e, ops)
+			tmcache = storage_cell_tmcache()
+			_fill_one_PA_left!(PAnew, PAold, adagTold, id_left, idxr, idxs, orbr, orbs, sc, sl, h2e, ops, tmcache)
 		end
 	else
+		tmcache = TensorMapCache()
 		for (idxr, idxs, orbr, orbs) in pairs
-			_fill_one_PA_left!(PAnew, PAold, adagTold, id_left, idxr, idxs, orbr, orbs, sc, sl, h2e, ops)
+			_fill_one_PA_left!(PAnew, PAold, adagTold, id_left, idxr, idxs, orbr, orbs, sc, sl, h2e, ops, tmcache)
 		end
 	end
 	return PAnew

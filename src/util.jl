@@ -89,11 +89,12 @@ function configure_threading!(; blas_threads::Int=1)
 end
 
 """
-    recommended_threading(; cores, n_terms, strategy)
+    recommended_threading(; cores, n_terms, n_storage_tasks, strategy)
 
 Suggest how to split CPU cores between Julia structural parallelism and BLAS.
 
-- `strategy=:auto` — many `QCCenter` terms → Julia threads + BLAS=1; few terms → Julia=1 + BLAS threads.
+- `strategy=:auto` — many independent matvec/storage tasks → Julia threads + BLAS=1;
+  otherwise Julia=1 + BLAS threads.
 - `strategy=:julia` / `:blas` — force one layer.
 
 Restart Julia with `julia -t <julia_threads>`; call `configure_threading!(blas_threads=...)`.
@@ -101,6 +102,7 @@ Restart Julia with `julia -t <julia_threads>`; call `configure_threading!(blas_t
 function recommended_threading(;
 	cores::Int=max(1, Threads.nthreads()),
 	n_terms::Int=0,
+	n_storage_tasks::Int=0,
 	strategy::Symbol=:auto,
 )
 	if strategy == :julia
@@ -108,8 +110,9 @@ function recommended_threading(;
 	elseif strategy == :blas
 		return (julia_threads=1, blas_threads=cores, strategy=:blas)
 	end
-	# auto: need enough independent terms to amortize @spawn overhead
-	if n_terms > 0 && n_terms < 2 * cores
+	# auto: need enough independent work to amortize Julia scheduling overhead.
+	n_tasks = max(n_terms, n_storage_tasks)
+	if n_tasks > 0 && n_tasks < 2 * cores
 		return (julia_threads=1, blas_threads=cores, strategy=:blas)
 	end
 	return (julia_threads=cores, blas_threads=1, strategy=:julia)
@@ -120,3 +123,5 @@ function apply_recommended_threading!(; kwargs...)
 	configure_threading!(blas_threads=rec.blas_threads)
 	return rec
 end
+
+@inline active_blas_threads_for_julia() = Threads.nthreads() > 1 ? 1 : BLAS.get_num_threads()

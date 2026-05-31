@@ -363,6 +363,7 @@ function _apply_twoside_path!(
 end
 
 const _fusion_parallel_ys = Ref{Union{Nothing, Vector{MPSBondTensor}}}(nothing)
+const _fusion_parallel_workspaces = Ref{Union{Nothing, Vector{Any}}}(nothing)
 
 function _ensure_fusion_thread_ys!(y::MPSBondTensor)
 	cache = _fusion_parallel_ys[]
@@ -380,6 +381,22 @@ function _ensure_fusion_thread_ys!(y::MPSBondTensor)
 	return cache
 end
 
+function _ensure_fusion_thread_workspaces!(workspace::Vector)
+	cache = _fusion_parallel_workspaces[]
+	nt = Threads.nthreads()
+	if cache === nothing || length(cache) != nt
+		cache = Vector{Any}(undef, nt)
+		_fusion_parallel_workspaces[] = cache
+	end
+	for tid in 1:nt
+		if !isassigned(cache, tid) || typeof(cache[tid]) != typeof(workspace) ||
+				length(cache[tid]) != length(workspace)
+			cache[tid] = similar(workspace)
+		end
+	end
+	return cache
+end
+
 function _use_parallel_fusion(paths::AbstractVector{TwosideFusionPath})
 	nt = Threads.nthreads()
 	return nt > 1 && length(paths) >= nt * MIN_FUSION_PATHS_PER_THREAD
@@ -390,6 +407,7 @@ function _apply_twoside_paths_parallel!(
 	paths::Vector{TwosideFusionPath}, workspace::Vector, α::Number,
 )
 	ys = _ensure_fusion_thread_ys!(y)
+	workspaces = _ensure_fusion_thread_workspaces!(workspace)
 	nt = length(ys)
 	for tid in 1:nt
 		fill!(ys[tid], 0)
@@ -399,7 +417,7 @@ function _apply_twoside_paths_parallel!(
 	for tid in 1:nt
 		tasks[tid] = Threads.@spawn begin
 			yt = ys[tid]
-			ws = similar(workspace)
+			ws = workspaces[tid]
 			while true
 				i = Threads.atomic_add!(nexti, 1)
 				i > length(paths) && break
