@@ -3,10 +3,12 @@ using Printf
 """
 Per half-sweep timings.
 
+- `Trot`: rotate/update the next renormalized environment after the two-site split (`updatestoragerenormalize*` + `setstorage!`)
+- `Tctr`: contract/build the current two-site QC dot environments (`renormalizestorageleft/right`)
 - `Teff`: assemble `QCCenter` (`renormalizedstorage` + `terms`) and `qc_diagonal_aa!` when preconditioning is on
 - `Teig`: Davidson (default, Olsen) / Lanczos — `H|ψ⟩` matvecs at bond eigsolve (`nmv`)
-- `Tblk` (`bond_block_time`): block2-aligned **two-site bond update** = `Teff + Teig + Tsvd + Tsplt` (excludes environment prep; see `Tmve`)
-- `Tmve`: `renormalizestorage*` (heavy) + post-SVD `updatestoragerenormalize*` / `setstorage!` (light) — **not** block2 `Tmve` (`move_to` only)
+- `Tblk` (`bond_block_time`): **two-site bond update** = `Teff + Teig + Tsvd + Tsplt` (excludes `Tmve`)
+- `Tmve`: movement total currently measured as `Tctr + Trot`
 - `Tsvd`: two-site SVD truncation
 - `Tsplt`: split / merge MPS after SVD (normalize, bond tensors, energy check)
 
@@ -24,11 +26,11 @@ end
 bond_eig_resnorm(rec::BondEigRecord) = rec.normres
 
 mutable struct DMRGTiming
+	tctr::Float64
+	trot::Float64
 	teff::Float64
 	teig::Float64
 	tmve::Float64
-	tmve_heavy::Float64
-	tmve_light::Float64
 	tsvd::Float64
 	tsplt::Float64
 	nbonds::Int
@@ -39,8 +41,7 @@ end
 DMRGTiming() = DMRGTiming(0, 0, 0, 0, 0, 0, 0, 0, 0, BondEigRecord[])
 
 function reset!(t::DMRGTiming)
-	t.teff = t.teig = t.tmve = 0.0
-	t.tmve_heavy = t.tmve_light = 0.0
+	t.tctr = t.trot = t.teff = t.teig = t.tmve = 0.0
 	t.tsvd = t.tsplt = 0.0
 	t.nbonds = 0
 	t.n_matvec = 0
@@ -81,11 +82,9 @@ function print_dmrg_timing(t::DMRGTiming; io::IO=stdout, prefix::String="", dire
 	dir = isempty(direction) ? "" : " | Direction = $direction"
 	@printf(io, "%sTime sweep = %8.3f%s\n", prefix, total_sweep_time(t), dir)
 	tblk = bond_block_time(t)
+	@printf(io, "%s | Trot = %.3f | Tctr = %.3f\n", prefix, t.trot, t.tctr)
 	@printf(io, "%s | Teff = %.3f | Teig = %.3f | Tblk = %.3f | Tmve = %.3f | Tsvd = %.3f | Tsplt = %.3f",
 		prefix, t.teff, t.teig, tblk, t.tmve, t.tsvd, t.tsplt)
-	if t.tmve_heavy > 0 || t.tmve_light > 0
-		@printf(io, " | Tmve_h = %.3f | Tmve_l = %.3f", t.tmve_heavy, t.tmve_light)
-	end
 	if t.nbonds > 0
 		@printf(io, " | nbonds = %d", t.nbonds)
 	end

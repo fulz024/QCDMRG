@@ -43,7 +43,7 @@ end
 function _timed!(f, t::DMRGTiming, field::Symbol)
 	Δ = @elapsed ret = f()
 	setproperty!(t, field, getproperty(t, field) + Δ)
-	if field === :tmve_heavy || field === :tmve_light
+	if field === :tctr || field === :trot
 		t.tmve += Δ
 	end
 	return ret
@@ -70,7 +70,7 @@ function _prepare_bond_heff!(env::QCDMRGCache, bond::Int, t; compute_aa::Bool=fa
 	Sleft, Sright, mpsA, mpsB = if t === nothing
 		_renormalize_bond_storages!(env, bond)
 	else
-		_timed!(() -> _renormalize_bond_storages!(env, bond), t, :tmve_heavy)
+		_timed!(() -> _renormalize_bond_storages!(env, bond), t, :tctr)
 	end
 	heff, x, Opleft, Opright = if t === nothing
 		heff, x, Opleft, Opright = _assemble_heff!(Sleft, Sright, mpsA, mpsB)
@@ -223,7 +223,7 @@ function _optimize_bond_left!(env::QCDMRGCache, bond::Int, alg::QCDMRG2)
 			env.mps[bond + 1] = permute(v2, (1, 2), (3,))
 			Snew = updatestoragerenormalizeleft(Opleft, renormalizedoperator(env.mps[bond]))
 			setstorage!(env, bond, Snew)
-		end, t, :tmve_light)
+		end, t, :trot)
 		t.nbonds += 1
 	end
 
@@ -292,7 +292,7 @@ function _optimize_bond_right!(env::QCDMRGCache, bond::Int, alg::QCDMRG2)
 			env.mps.s[bond + 1] = s
 			Snew = updatestoragerenormalizeright(Opright, renormalizedoperator(mpsB))
 			setstorage!(env, bond + 1, Snew)
-		end, t, :tmve_light)
+		end, t, :trot)
 		t.nbonds += 1
 	end
 	(alg.verbosity > 2) && println("E₀=$(eigenvalue_0), E=$eigenvalue, δ=$(round(delta, digits=12)), χ=$(dim(space(s, 2))) after optimizing bond $bond")

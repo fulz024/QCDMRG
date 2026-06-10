@@ -1,6 +1,6 @@
 # Minimum independent terms per Julia thread before using @spawn parallel path.
 const MIN_TERMS_PER_THREAD = 2
-# Minimum fusion paths per thread inside `apply_twosides!` (block2 Quanta-style; only when term matvec is serial).
+
 const MIN_FUSION_PATHS_PER_THREAD = 4
 
 struct TwosideFusionPath
